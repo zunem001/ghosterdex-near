@@ -1,0 +1,45 @@
+/**
+ * Private AI's limits, one copy for the phone (screens/PrivateAi.tsx) and the
+ * worker (worker/privateai.ts), so the two can never disagree about what a
+ * conversation may carry.
+ */
+export const AI_LIMITS = {
+  /** one message, in characters */
+  message: 2000,
+  /** turns of the conversation sent with a question, newest kept */
+  turns: 12,
+  /** characters of conversation sent with a question, newest kept */
+  context: 8000,
+  /** the longest answer, in tokens */
+  answer: 700,
+  /** questions per account, a minute and a day */
+  perMinute: 10,
+  perDay: 200,
+};
+
+/** what a top-up of credit may be, in dollars (worker /api/ai/credit/order); the bridge's floor is $5 */
+export const AI_TOPUPS = [5, 10, 25];
+
+export type AiTurn = { role: 'user' | 'assistant'; content: string };
+
+/**
+ * The newest turns that fit, ending in the question, which always fits. The
+ * phone sends no more than this, so a long chat never outgrows the route's
+ * body cap, and the worker trims by the same rule whatever it is sent. A
+ * conversation opens with the person, as the model's template expects.
+ */
+export function newestTurns(all: AiTurn[]): AiTurn[] {
+  const last = all[all.length - 1];
+  if (!last) return [];
+  const kept: AiTurn[] = [last];
+  let size = last.content.length;
+  for (let i = all.length - 2; i >= 0 && kept.length < AI_LIMITS.turns; i--) {
+    const t = all[i];
+    if (!t.content) continue;
+    if (size + t.content.length > AI_LIMITS.context) break;
+    size += t.content.length;
+    kept.unshift(t);
+  }
+  while (kept.length > 1 && kept[0].role !== 'user') kept.shift();
+  return kept;
+}

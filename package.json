@@ -1,0 +1,32 @@
+{
+  "name": "ghosterdex-near",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GhosterDex on NEAR: the agent kit and Private AI code for NEAR HACKATHON",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "build:kit": "node agent/build.mjs"
+  },
+  "dependencies": {
+    "@noble/hashes": "1.8.0",
+    "@noble/secp256k1": "2.3.0",
+    "@ton/core": "0.63.1",
+    "@ton/crypto": "3.3.0",
+    "@ton/ton": "16.3.0",
+    "tweetnacl": "1.0.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "tsx": "4.23.0",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "@ton/crypto-primitives": "2.1.0",
+    "jssha": "3.2.0",
+    "zod": "4.6.6"
+  },
+  "type": "module"
+}
