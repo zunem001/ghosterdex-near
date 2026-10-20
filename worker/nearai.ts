@@ -25,8 +25,9 @@ export const NEAR_CATALOGUE_URL = 'https://cloud-api.near.ai/v1/model/list?limit
 
 export type AiTier = 'tee' | 'partner' | 'open';
 export type AiNet = 'near' | 'cocoon';
-/** how a chat asks a model to answer directly instead of thinking aloud first */
-export type AiThink = 'enable_thinking' | 'thinking' | null;
+/** how a chat asks a model to answer directly instead of thinking aloud first: a chat_template_kwargs switch, or
+    'effort' for reasoning_effort low */
+export type AiThink = 'enable_thinking' | 'thinking' | 'effort' | null;
 
 export interface AiModel {
   /** what a request names */
@@ -100,11 +101,16 @@ const perM = (c: unknown): number => {
 };
 const round4 = (v: number) => Math.round(v * 10_000) / 10_000;
 
-/** How a family is asked to answer directly (NEAR AI's Reasoning Models guide): GLM and Qwen by enable_thinking, Kimi by thinking. */
+/**
+ * How a family is asked to answer directly, as measured on NEAR AI on 2026-10-20: Qwen by enable_thinking, Kimi
+ * by thinking, and GLM by reasoning_effort low. GLM's own enable_thinking switch leaks its thought into the answer
+ * (the reply opened "The user is asking..." and ran to a closing </think>), and minimal still thinks.
+ */
 function thinkOf(id: string, tier: AiTier): AiThink {
   if (tier === 'open') return null;
   if (/^moonshotai\//i.test(id)) return 'thinking';
-  if (/^(z-ai|zai-org|qwen)\//i.test(id)) return 'enable_thinking';
+  if (/^(z-ai|zai-org)\//i.test(id)) return 'effort';
+  if (/^qwen\//i.test(id)) return 'enable_thinking';
   return null;
 }
 
@@ -271,6 +277,10 @@ export function shapeFor(model: AiModel, base: Record<string, unknown>, opts: { 
     /* a sampling setting goes only to a model that lists it (NEAR AI's catalogue); a Cocoon model takes them all */
     if (model.net === 'cocoon' || model.params.includes(k)) body[k] = v;
   }
-  if (opts.direct && model.think && body.chat_template_kwargs === undefined) body.chat_template_kwargs = { [model.think]: false };
+  /* the caller's own word on thinking, either way, is never overridden */
+  if (opts.direct && model.think && body.chat_template_kwargs === undefined && body.reasoning_effort === undefined) {
+    if (model.think === 'effort') body.reasoning_effort = 'low';
+    else body.chat_template_kwargs = { [model.think]: false };
+  }
   return body;
 }

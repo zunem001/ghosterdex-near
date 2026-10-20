@@ -134,6 +134,8 @@ export function cleanTurns(raw: unknown): { turns: AiTurn[] } | AiRefusal {
 export function stripThinking(text: string): string {
   return String(text || '')
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    /* a thought whose opening tag the template sent itself: everything up to its close (GLM did this) */
+    .replace(/^[\s\S]*<\/think>/i, '')
     .replace(/^\s*<think>[\s\S]*$/i, '')
     .trim();
 }
