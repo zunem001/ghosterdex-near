@@ -112,6 +112,22 @@ export function chargeMicro(m: Pick<AiModel, 'inPerM' | 'outPerM' | 'cachePerM'>
   return v > 0 ? Math.min(Math.ceil(v - 1e-9), Number.MAX_SAFE_INTEGER) : 0;
 }
 
+/**
+ * Tells the owner, at most once an hour per network, that it refused a question for want of the house's own
+ * credit there (NEAR AI answers 402 "insufficient_credits"): every person's question fails until it is topped
+ * up, and the person only reads "unavailable". Without an alert (tests, or no Telegram) it does nothing.
+ */
+export async function noteUpstreamCredit(env: Pick<AiModelsEnv, 'STATE'>, m: Pick<AiModel, 'net'>, alert?: (text: string) => Promise<unknown>): Promise<void> {
+  if (!alert) return;
+  const key = `aicredit:alerted:${m.net}`;
+  if (await env.STATE.get(key).catch(() => null)) return;
+  await env.STATE.put(key, String(Date.now()), { expirationTtl: 3600 }).catch(() => {});
+  const where = m.net === 'near' ? 'NEAR AI' : 'Cocoon';
+  await alert(
+    `⚠️ <b>Private AI: ${where} is out of credit</b>\n${where} refused a question for want of the house's credit there, so every question to its models fails until it is topped up${m.net === 'near' ? ' at cloud.near.ai' : ''}.`,
+  ).catch(() => {});
+}
+
 /** What a person sees of a model: never its sampling settings. */
 export function publicModel(m: AiModel) {
   return {

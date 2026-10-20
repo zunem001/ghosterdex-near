@@ -23,7 +23,7 @@
  * own (per key, and per address for keys that do not exist).
  */
 import { ledgerOf, type AiLedgerNs, type Ledger } from './ailedger';
-import { aiModels, chargeMicro, defaultModel, pickModel, routeFor, type AiModelsEnv } from './aimodels';
+import { aiModels, chargeMicro, defaultModel, noteUpstreamCredit, pickModel, routeFor, type AiModelsEnv } from './aimodels';
 import { shapeFor } from './nearai';
 
 /* the price lives with the models now (worker/aimodels.ts); kept here for older importers */
@@ -319,6 +319,8 @@ export interface AiApiCtx {
   waitUntil?: (p: Promise<unknown>) => void;
   fetcher?: typeof fetch;
   ledgerFor?: (uid: string) => Ledger | null;
+  /** a message to the owner (index.ts ownerTelegram): a network out of the house's credit */
+  alert?: (text: string) => Promise<unknown>;
 }
 
 /** Everything under /api/ai/v1, or null for any other path. */
@@ -412,6 +414,8 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
   if (!r.ok || !r.body) {
     await release();
     console.log('[aiapi] gateway', r.status, Date.now() - t0, 'ms');
+    /* 402 is the house's credit at the network, never the caller's: they read "unavailable", the owner is told */
+    if (r.status === 402) await noteUpstreamCredit(env, model, ctx.alert);
     if (r.status === 429) return oaiError(429, 'The model is busy. Try again shortly.', 'rate_limit_exceeded', 'rate_limit_error');
     if (r.status === 400) return oaiError(400, 'The model refused this request.', 'invalid_request');
     return oaiError(r.status === 404 ? 503 : 502, 'The model is unavailable right now. Try again later.', 'upstream_error', 'server_error');

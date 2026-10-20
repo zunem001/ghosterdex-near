@@ -39,7 +39,7 @@ import { looksLikeSecret } from '../src/lib/secretGuard';
 import { AI_LIMITS, newestTurns, type AiTurn } from '../src/lib/aiLimits';
 import { MICRO, cleanPrice, ledgerOf, type AiKey, type AiLedgerNs, type AiUse, type Ledger } from './ailedger';
 import { API_PREFIX, inputBound, newKey } from './aiapi';
-import { aiModels, aiPrice, anyReady, chargeMicro, defaultModel, forgetPrice, pickModel, publicModel, routeFor, type AiModel, type AiModelsEnv } from './aimodels';
+import { aiModels, aiPrice, anyReady, chargeMicro, defaultModel, forgetPrice, noteUpstreamCredit, pickModel, publicModel, routeFor, type AiModel, type AiModelsEnv } from './aimodels';
 import { nearMargin, shapeFor } from './nearai';
 
 export { AI_LIMITS, type AiTurn };
@@ -67,7 +67,8 @@ export const AI_BODY_BYTES = 32_000;
 const ASK_MS = 60_000;
 const utf8 = new TextEncoder();
 
-export type AiRefusal = { error: string; code: string; status: number };
+/** upstream: the network's own status where it says why (402: the house's credit there is spent); never sent on */
+export type AiRefusal = { error: string; code: string; status: number; upstream?: number };
 
 /** The words for each refusal. The phone shows its own translation by `code`; these are the fallback. */
 const SAID: Record<string, [number, string]> = {
@@ -202,9 +203,10 @@ export async function askModel(env: PrivateAiEnv, turns: AiTurn[], model: AiMode
     return refusal(slow ? 'slow' : 'unavailable');
   }
   if (!r.ok) {
-    /* the status says whose problem it is: 401/403 the key, 402 the console's balance, 404 the address */
+    /* the status says whose problem it is: 401/403 the key, 402 the house's credit there, 404 the address */
     console.log('[privateai] gateway', r.status, Date.now() - t0, 'ms');
-    return refusal(r.status === 429 ? 'busy' : r.status === 404 ? 'not_connected' : 'unavailable');
+    const x = refusal(r.status === 429 ? 'busy' : r.status === 404 ? 'not_connected' : 'unavailable');
+    return r.status === 402 ? { ...x, upstream: 402 } : x;
   }
   const j = (await r.json().catch(() => null)) as {
     model?: unknown;
@@ -261,6 +263,8 @@ export interface PrivateAiCtx {
   /** COCOON pays a top-up as itself at this discount, as it pays a pass (worker/scout.ts) */
   cocoon?: { master: string; off: number };
   now?: number;
+  /** a message to the owner (index.ts ownerTelegram): a network out of the house's credit */
+  alert?: (text: string) => Promise<unknown>;
 }
 
 const ROUTES = new Set(['/api/ai/chat', '/api/ai/account', '/api/ai/keys', '/api/ai/keys/revoke', '/api/ai/price', '/api/ai/grant']);
@@ -400,6 +404,7 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
   if ('error' in got) {
     /* nothing answered, nothing charged: a refusal, an outage and a withheld answer cost the person nothing */
     await ledger({ op: 'release', hold: holdId });
+    if (got.upstream === 402) await noteUpstreamCredit(env, model, ctx.alert);
     return refuse(got);
   }
   const settled = await ledger({ op: 'settle', hold: holdId, micro: chargeMicro(model, got.tokensIn, got.tokensOut, got.cached), key: 'chat', tokensIn: got.tokensIn, tokensOut: got.tokensOut, free });
