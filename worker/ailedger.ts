@@ -45,7 +45,8 @@ const KEEP_REFS = 500;
 /** hash is the key's SHA-256, kept so a revocation can delete its index; the key itself is never stored */
 export type AiKey = { id: string; name: string; last4: string; created: number; revoked?: number; hash?: string };
 export type AiUse = { n: number; in: number; out: number; micro: number; last: number };
-export type AiHold = { micro: number; at: number; key: string };
+/** fb: the most a free request held under a day's cap may cost, counted against the cap until it settles */
+export type AiHold = { micro: number; at: number; key: string; fb?: number };
 export type AiTopup = { at: number; micro: number; ref: string; note: string };
 
 export interface LedgerRecord {
@@ -58,6 +59,8 @@ export interface LedgerRecord {
   refs: string[];
   /** cost an answer ran over its hold and the balance could not cover: the house's, never the person's */
   shortfall: number;
+  /** what the account's free API keys spent on one UTC day (the owner's, worker/aiapi.ts) */
+  free?: { day: string; micro: number };
 }
 
 export function emptyLedger(): LedgerRecord {
@@ -67,7 +70,7 @@ export function emptyLedger(): LedgerRecord {
 export type LedgerOp =
   | { op: 'state' }
   | { op: 'credit'; ref: string; micro: number; note?: string }
-  | { op: 'hold'; micro: number; key: string; free?: boolean; id?: string }
+  | { op: 'hold'; micro: number; key: string; free?: boolean; id?: string; freeCap?: number }
   | { op: 'settle'; hold: string; micro: number; key: string; tokensIn: number; tokensOut: number; free?: boolean }
   | { op: 'release'; hold: string }
   | { op: 'addKey'; key: AiKey }
@@ -83,6 +86,14 @@ function keyLive(l: LedgerRecord, key: string): boolean {
   if (key === 'chat') return true;
   const k = l.keys.find((x) => x.id === key);
   return Boolean(k && !k.revoked);
+}
+
+const dayOf = (now: number) => new Date(now).toISOString().slice(0, 10);
+
+/** What the free API keys have spent today: settled, plus the most each free request still on hold may cost. */
+export function freeUsed(l: LedgerRecord, now: number): number {
+  const settled = l.free?.day === dayOf(now) ? whole(l.free.micro) : 0;
+  return settled + Object.values(l.holds).reduce((s, h) => s + whole(h.fb), 0);
 }
 
 function count(l: LedgerRecord, key: string, tokensIn: number, tokensOut: number, micro: number, now: number) {
@@ -113,17 +124,31 @@ export function applyOp(l: LedgerRecord, o: LedgerOp, now: number): LedgerReply 
 
     case 'hold': {
       if (!keyLive(l, o.key)) return { ok: false, why: 'key_off' };
-      const micro = o.free ? 0 : whole(o.micro);
+      const bound = whole(o.micro);
+      /* Free use spends no credit. Where the caller sets a day's cap (the owner's API keys), a day's free spend,
+         with what is still on hold, stays under it: a key that leaks cannot spend the house's upstream credit
+         without end. */
+      const cap = o.free ? whole(o.freeCap) : 0;
+      if (cap > 0) {
+        const used = freeUsed(l, now);
+        if (used + bound > cap) return { ok: false, why: 'free_cap', used, cap };
+      }
+      const micro = o.free ? 0 : bound;
       if (micro > l.bal) return { ok: false, why: 'no_credit', bal: l.bal, need: micro };
       const id = o.id || `h${now.toString(36)}${Math.random().toString(36).slice(2, 8)}`;
       l.bal -= micro;
-      l.holds[id] = { micro, at: now, key: o.key };
+      l.holds[id] = { micro, at: now, key: o.key, ...(cap > 0 ? { fb: bound } : {}) };
       return { ok: true, hold: id, bal: l.bal };
     }
 
     case 'settle': {
       const cost = o.free ? 0 : whole(o.micro);
       const h = l.holds[o.hold];
+      /* a free request held under a day's cap: its true cost joins the day's free spend */
+      if (o.free && h?.fb !== undefined) {
+        const day = dayOf(now);
+        l.free = { day, micro: (l.free?.day === day ? whole(l.free.micro) : 0) + whole(o.micro) };
+      }
       let charged = cost;
       if (h) {
         delete l.holds[o.hold];

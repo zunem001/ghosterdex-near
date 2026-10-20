@@ -1,9 +1,10 @@
 /**
  * Private AI's API: keys a person makes in Explore's AI services, used from
- * any tool that speaks OpenAI's chat completions, answered by Cocoon and paid
- * by the tokens used from the account's prepaid credit (owner, 2026-10-14:
- * "i would have preferred users been able to get cocoon api key", then "by
- * tokens used").
+ * any tool that speaks OpenAI's chat completions, answered by NEAR AI or
+ * Cocoon (worker/aimodels.ts, by the model a request names) and paid by the
+ * tokens used from the account's prepaid credit (owner, 2026-10-14: "i would
+ * have preferred users been able to get cocoon api key", then "by tokens
+ * used"; 2026-10-20: NEAR AI's models too, at cost).
  *
  *   base     https://ghosterdex.com/api/ai/v1
  *   GET      /models
@@ -21,9 +22,14 @@
  * there is no Telegram or wallet session to resolve, and its limits are its
  * own (per key, and per address for keys that do not exist).
  */
-import { costMicro, DEFAULT_PRICE, cleanPrice, ledgerOf, type AiLedgerNs, type AiPrice, type Ledger } from './ailedger';
+import { ledgerOf, type AiLedgerNs, type Ledger } from './ailedger';
+import { aiModels, chargeMicro, defaultModel, pickModel, routeFor, type AiModelsEnv } from './aimodels';
+import { shapeFor } from './nearai';
 
-export interface AiApiEnv {
+/* the price lives with the models now (worker/aimodels.ts); kept here for older importers */
+export { aiPrice, forgetPrice } from './aimodels';
+
+export interface AiApiEnv extends AiModelsEnv {
   STATE: {
     get(key: string, type?: 'json'): Promise<any>;
     put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<void>;
@@ -31,15 +37,17 @@ export interface AiApiEnv {
   };
   AI_DO?: AiLedgerNs;
   PRIVATE_AI?: string;
-  PRIVATE_AI_BASE?: string;
-  PRIVATE_AI_MODEL?: string;
-  PRIVATE_AI_PRICE_IN?: string;
-  PRIVATE_AI_PRICE_OUT?: string;
-  TONCONSOLE_COCOON_KEY?: string;
+  /** dollars a day the owner's free API keys may spend together; $10 unless set */
+  PRIVATE_AI_FREE_DAY?: string;
+}
+
+/** The day's cap on the owner's free API keys, in micro-dollars: the var, else $10, never above $1,000. */
+export function freeDayMicro(env: Pick<AiApiEnv, 'PRIVATE_AI_FREE_DAY'>): number {
+  const v = Number(env.PRIVATE_AI_FREE_DAY);
+  return Math.round((Number.isFinite(v) && v > 0 ? Math.min(v, 1000) : 10) * 1_000_000);
 }
 
 export const API_PREFIX = '/api/ai/v1';
-export const API_MODEL = 'Qwen/Qwen3-32B';
 /** the largest request body: a full 32k-token context with room to spare */
 export const API_BODY_BYTES = 192_000;
 export const API_LIMITS = {
@@ -92,22 +100,6 @@ export async function newKey(): Promise<{ key: string; id: string; hash: string;
 }
 
 export type KeyIndex = { uid: string; id: string; owner?: boolean };
-
-/* ------------------------------------------------------------ price */
-
-let _price: { at: number; p: AiPrice } | null = null;
-/** The price per million tokens: the owner's (KV aiprice), else the vars, else the default. Kept 30 s per isolate. */
-export async function aiPrice(env: AiApiEnv): Promise<AiPrice> {
-  if (_price && Date.now() - _price.at < 30_000) return _price.p;
-  const kv = cleanPrice(await env.STATE.get('aiprice', 'json').catch(() => null));
-  const vars = cleanPrice({ inPerM: env.PRIVATE_AI_PRICE_IN, outPerM: env.PRIVATE_AI_PRICE_OUT });
-  const p = kv || vars || DEFAULT_PRICE;
-  _price = { at: Date.now(), p };
-  return p;
-}
-export function forgetPrice() {
-  _price = null;
-}
 
 /* ------------------------------------------------------------ requests */
 
@@ -175,13 +167,26 @@ export function cleanRequest(b: any, model: string): Clean | { status: number; m
     if (t !== 'text' && t !== 'json_object') return bad('response_format may be text or json_object.', 'unsupported');
     up.response_format = { type: t };
   }
+  /* how much a reasoning model thinks: OpenAI's word for it, and the two switches NEAR AI's private models read */
+  if (b.reasoning_effort != null) {
+    if (!['minimal', 'low', 'medium', 'high'].includes(String(b.reasoning_effort))) return bad('reasoning_effort may be minimal, low, medium or high.');
+    up.reasoning_effort = String(b.reasoning_effort);
+  }
+  if (b.chat_template_kwargs != null) {
+    const kw = b.chat_template_kwargs;
+    const keys = kw && typeof kw === 'object' && !Array.isArray(kw) ? Object.keys(kw) : null;
+    if (!keys || keys.some((k) => (k !== 'enable_thinking' && k !== 'thinking') || typeof kw[k] !== 'boolean')) {
+      return bad('chat_template_kwargs may carry enable_thinking or thinking, true or false.', 'unsupported');
+    }
+    up.chat_template_kwargs = Object.fromEntries(keys.map((k) => [k, kw[k]]));
+  }
   const stream = b.stream === true;
   return { up, texts: messages.map((m) => m.content), maxTokens, stream, wantUsage: stream && b.stream_options?.include_usage === true };
 }
 
 /* ------------------------------------------------------------ the meter for a stream */
 
-type Usage = { prompt_tokens?: number; completion_tokens?: number };
+type Usage = { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
 
 /**
  * Passes an event stream through as it arrives and reads the usage the gateway
@@ -191,7 +196,12 @@ type Usage = { prompt_tokens?: number; completion_tokens?: number };
  */
 export function meteredStream(
   upstream: ReadableStream<Uint8Array>,
-  opts: { wantUsage: boolean; onEnd: (u: { tokensIn: number | null; tokensOut: number; seenChars: number; complete: boolean }) => Promise<void>; waitUntil?: (p: Promise<unknown>) => void },
+  opts: {
+    wantUsage: boolean;
+    /** outCounted: the gateway said how many answer tokens; seenBytes: the answer and its visible thinking, in bytes */
+    onEnd: (u: { tokensIn: number | null; tokensOut: number; outCounted: boolean; cached: number; seenChars: number; seenBytes: number; complete: boolean }) => Promise<void>;
+    waitUntil?: (p: Promise<unknown>) => void;
+  },
 ): ReadableStream<Uint8Array> {
   const reader = upstream.getReader();
   const dec = new TextDecoder();
@@ -203,10 +213,21 @@ export function meteredStream(
   const finish = (complete: boolean) => {
     if (ended) return Promise.resolve();
     ended = true;
-    const tokensOut = Number(usage?.completion_tokens);
+    /* Number(null) is 0: a count is one only when the gateway sent a number, and an input of 0 tokens is none */
+    const tokensOut = usage?.completion_tokens == null ? NaN : Number(usage.completion_tokens);
     const tokensIn = Number(usage?.prompt_tokens);
+    const cached = Number(usage?.prompt_tokens_details?.cached_tokens);
+    const outCounted = Number.isFinite(tokensOut) && tokensOut >= 0;
     return opts
-      .onEnd({ tokensIn: Number.isFinite(tokensIn) && tokensIn >= 0 ? tokensIn : null, tokensOut: Number.isFinite(tokensOut) && tokensOut >= 0 ? tokensOut : tokenGuess(seen), seenChars: seen.length, complete })
+      .onEnd({
+        tokensIn: Number.isFinite(tokensIn) && tokensIn > 0 ? tokensIn : null,
+        tokensOut: outCounted ? tokensOut : tokenGuess(seen),
+        outCounted,
+        cached: Number.isFinite(cached) && cached > 0 ? cached : 0,
+        seenChars: seen.length,
+        seenBytes: utf8.encode(seen).length,
+        complete,
+      })
       .catch(() => {});
   };
   /* one line of the stream: kept, or dropped when it is the usage event nobody asked to see */
@@ -323,16 +344,18 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
   if (env.PRIVATE_AI === 'owner' && !idx.owner) return oaiError(403, 'Private AI is not open to this account yet.', 'not_available', 'permission_error');
   if (await ctx.overLimit(`rl:aikey:${idx.id}`, API_LIMITS.perKey)) return oaiError(429, 'Too many requests for this key. Slow down.', 'rate_limit_exceeded', 'rate_limit_error');
 
-  const model = String(env.PRIVATE_AI_MODEL || '').trim() || API_MODEL;
+  const models = await aiModels(env, ctx.fetcher);
   if (sub === '/models' && request.method === 'GET') {
-    return new Response(JSON.stringify({ object: 'list', data: [{ id: model, object: 'model', created: 1764460800, owned_by: 'cocoon' }] }), {
+    /* every model that can answer now; private says whether it runs in secure hardware */
+    const data = models
+      .filter((m) => m.ready)
+      .map((m) => ({ id: m.id, object: 'model', created: 1764460800, owned_by: m.net === 'cocoon' ? 'cocoon' : m.maker.toLowerCase(), private: m.tier !== 'open' }));
+    return new Response(JSON.stringify({ object: 'list', data }), {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS },
     });
   }
   if (sub !== '/chat/completions' || request.method !== 'POST') return oaiError(404, 'Not found. The API offers GET /models and POST /chat/completions.', 'not_found');
-
-  const base = String(env.PRIVATE_AI_BASE || '').trim().replace(/\/+$/, '');
-  if (!/^https?:\/\/\S+$/.test(base) || !env.TONCONSOLE_COCOON_KEY) return oaiError(503, 'The model is not connected yet. Try again later.', 'not_connected', 'server_error');
+  if (!models.some((m) => m.ready)) return oaiError(503, 'The model is not connected yet. Try again later.', 'not_connected', 'server_error');
 
   const text = await readBody(request, API_BODY_BYTES);
   if (text === null) return oaiError(413, `The request is over ${API_BODY_BYTES} bytes.`, 'request_too_large');
@@ -342,37 +365,43 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
   } catch {
     return oaiError(400, 'The request body must be JSON.', 'invalid_json');
   }
-  const asked = typeof (b as any)?.model === 'string' ? (b as any).model : '';
-  if (asked && asked !== model && asked !== 'default') return oaiError(404, `The model ${asked.slice(0, 80)} does not exist. Use ${model}.`, 'model_not_found');
-  const clean = cleanRequest(b, model);
+  const asked = typeof (b as any)?.model === 'string' ? (b as any).model.trim() : '';
+  const model = asked && asked !== 'default' ? pickModel(models, asked) : defaultModel(models, env);
+  if (!model) return oaiError(404, `The model ${asked.slice(0, 80)} does not exist. GET /models lists the ones that do.`, 'model_not_found');
+  const route = routeFor(env, model);
+  if (!route) return oaiError(503, 'The model is not connected yet. Try again later.', 'not_connected', 'server_error');
+  const clean = cleanRequest(b, model.id);
   if ('status' in clean) return oaiError(clean.status, clean.message, clean.code);
 
   const ledger = (ctx.ledgerFor || ((uid: string) => ledgerOf(env.AI_DO, uid)))(idx.uid);
   if (!ledger) return oaiError(503, 'Billing is not available right now.', 'unavailable', 'server_error');
-  /* the owner's keys are free (marked when the owner made them), and still counted */
+  /* the owner's keys are free (marked when the owner made them), still counted, and capped by the day */
   const free = idx.owner === true;
-  const price = await aiPrice(env);
   const inMax = inputBound(clean.texts);
-  const hold = await ledger({ op: 'hold', micro: costMicro(price, inMax, clean.maxTokens), key: idx.id, free });
+  const hold = await ledger({ op: 'hold', micro: chargeMicro(model, inMax, clean.maxTokens), key: idx.id, free, ...(free ? { freeCap: freeDayMicro(env) } : {}) });
   if (!hold.ok) {
     if (hold.why === 'key_off') return oaiError(401, 'That API key was revoked.', 'invalid_api_key');
     if (hold.why === 'no_credit') return oaiError(429, 'Not enough credit for this request. Add credit in GhosterDex: Explore, AI services, Private AI.', 'insufficient_quota', 'insufficient_quota');
+    if (hold.why === 'free_cap') return oaiError(429, "The free keys reached today's limit. It opens again at midnight UTC.", 'free_limit', 'insufficient_quota');
     return oaiError(503, 'Billing is not available right now.', 'unavailable', 'server_error');
   }
   const holdId = String(hold.hold);
-  const settle = (tokensIn: number, tokensOut: number) =>
-    ledger({ op: 'settle', hold: holdId, micro: costMicro(price, tokensIn, tokensOut), key: idx.id, tokensIn, tokensOut, free }).then(() => undefined);
+  const settle = (tokensIn: number, tokensOut: number, cached = 0) =>
+    ledger({ op: 'settle', hold: holdId, micro: chargeMicro(model, tokensIn, tokensOut, cached), key: idx.id, tokensIn, tokensOut, free }).then(() => undefined);
   const release = () => ledger({ op: 'release', hold: holdId }).then(() => undefined);
 
-  const upBody = clean.stream ? { ...clean.up, stream: true, stream_options: { include_usage: true } } : { ...clean.up, stream: false };
+  /* only the settings this model takes (worker/nearai.ts shapeFor) */
+  const upBody = shapeFor(model, clean.stream ? { ...clean.up, stream: true, stream_options: { include_usage: true } } : { ...clean.up, stream: false });
   const t0 = Date.now();
   let r: Response;
   try {
-    r = await (ctx.fetcher || fetch)(`${base}/chat/completions`, {
+    r = await (ctx.fetcher || fetch)(`${route.base}/chat/completions`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${env.TONCONSOLE_COCOON_KEY}`, 'Content-Type': 'application/json', 'User-Agent': 'GhosterDex AI API' },
+      headers: { Authorization: `Bearer ${route.key}`, 'Content-Type': 'application/json', 'User-Agent': 'GhosterDex AI API' },
       body: JSON.stringify(upBody),
       signal: clean.stream ? undefined : AbortSignal.timeout(300_000),
+      /* the key goes to the gateway named, never on to wherever a redirect points */
+      redirect: 'manual',
     });
   } catch (e) {
     await release();
@@ -388,14 +417,21 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
     return oaiError(r.status === 404 ? 503 : 502, 'The model is unavailable right now. Try again later.', 'upstream_error', 'server_error');
   }
 
+  /* What a request that comes back without the gateway's count pays (the caller hung up before it, or none was
+     sent): what it may have cost, never a guess below that. All of its input, which the model read in full before
+     answering, and its answer at a token a byte of what was seen, or, from a model that may think out of sight
+     (one its maker runs), the whole answer allowed. The hold already covers both. */
+  const unseenOut = (seenBytes: number) => (model.tier === 'open' ? clean.maxTokens : Math.min(clean.maxTokens, seenBytes));
+
   if (clean.stream) {
-    const inGuess = Math.ceil(inMax / 4);
     const body = meteredStream(r.body, {
       wantUsage: clean.wantUsage,
       waitUntil: ctx.waitUntil,
       onEnd: async (u) => {
-        console.log('[aiapi] stream', u.complete ? 'ended' : 'hung up', Date.now() - t0, 'ms', u.tokensIn ?? `~${inGuess}`, '/', u.tokensOut, 'tokens');
-        await settle(u.tokensIn ?? inGuess, u.tokensOut);
+        const tokensIn = u.tokensIn ?? inMax;
+        const tokensOut = u.outCounted ? u.tokensOut : unseenOut(u.seenBytes);
+        console.log('[aiapi] stream', u.complete ? 'ended' : 'hung up', Date.now() - t0, 'ms', u.tokensIn ?? `${inMax} uncounted`, '/', u.outCounted ? u.tokensOut : `${tokensOut} uncounted`, 'tokens');
+        await settle(tokensIn, tokensOut, u.cached);
       },
     });
     return new Response(body, { headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', ...CORS } });
@@ -406,10 +442,14 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
     await release();
     return oaiError(502, 'The model answered in a form this API cannot read.', 'upstream_error', 'server_error');
   }
-  const answer = j.choices.map((c: any) => String(c?.message?.content || '')).join('');
-  const tokensIn = Number.isFinite(Number(j?.usage?.prompt_tokens)) ? Number(j.usage.prompt_tokens) : Math.ceil(inMax / 4);
-  const tokensOut = Number.isFinite(Number(j?.usage?.completion_tokens)) ? Number(j.usage.completion_tokens) : tokenGuess(answer);
-  await settle(tokensIn, tokensOut);
+  /* the answer and its visible thinking, both answer tokens */
+  const answer = j.choices.map((c: any) => String(c?.message?.content || '') + String(c?.message?.reasoning_content || '')).join('');
+  const pin = Number(j?.usage?.prompt_tokens);
+  const pout = j?.usage?.completion_tokens == null ? NaN : Number(j.usage.completion_tokens);
+  const tokensIn = Number.isFinite(pin) && pin > 0 ? pin : inMax;
+  const tokensOut = Number.isFinite(pout) && pout >= 0 ? pout : unseenOut(utf8.encode(answer).length);
+  const cached = Number(j?.usage?.prompt_tokens_details?.cached_tokens);
+  await settle(tokensIn, tokensOut, Number.isFinite(cached) && cached > 0 ? cached : 0);
   console.log('[aiapi] answered', Date.now() - t0, 'ms', tokensIn, '/', tokensOut, 'tokens');
   return new Response(JSON.stringify(j), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS } });
 }
