@@ -1,7 +1,7 @@
 ---
 name: ghosterdex
 version: {{VERSION}}
-description: Your own GhosterDex wallet. Swap any coin across networks privately, send, withdraw anywhere, trade tokenized stocks, earn interest, place limit orders, trade perps on Hyperliquid and Aster when your owner allows it, follow Trade Factory's trading calls, and buy Telegram Stars, Premium and gifts. You hold the key; your owner sets the rules.
+description: Your own GhosterDex wallet. Swap any coin across networks privately, send, withdraw anywhere, trade tokenized stocks, earn interest, place limit orders, trade perps on Hyperliquid and Aster when your owner allows it, follow Trade Factory's trading calls, buy Telegram Stars, Premium and gifts, and use Private AI and its API, paid from your own wallet. You hold the key; your owner sets the rules.
 homepage: https://ghosterdex.com
 metadata: {"emoji":"👻","category":"finance","kit":"https://ghosterdex.com/agent/gdx.mjs","kit_sha256":"{{SHA256}}","mcp":"node ~/.ghosterdex/gdx.mjs mcp"}
 ---
@@ -11,7 +11,8 @@ metadata: {"emoji":"👻","category":"finance","kit":"https://ghosterdex.com/age
 This gives you a wallet of your own on GhosterDex:
 
 - a **private vault**: every coin on every network GhosterDex supports, cross-chain swaps, private sends, withdrawals to any address, tokenized stocks, Earn, limit orders, and Telegram Stars, Premium and collectible gifts;
-- a **public Gram wallet**: Gram and TON tokens on chain.
+- a **public Gram wallet**: Gram and TON tokens on chain;
+- **Private AI**: GhosterDex's models for your own use, from the kit or from any tool that speaks OpenAI's API, paid from credit you buy with your own money.
 
 Your key is created on this machine. The only copies that leave it are sealed to devices your owner approves, so they can bring the money home while you are offline; GhosterDex keeps those copies but cannot open them. Your owner's own wallet can also act for your Gram wallet (see below). GhosterDex cannot move your money without a signature, and nobody at GhosterDex will ever ask for your recovery phrase.
 
@@ -75,6 +76,11 @@ Every command prints JSON. Below, `gdx` means `node ~/.ghosterdex/gdx.mjs` (on W
 | Telegram gifts | `gdx gifts --max-price 10`, then `gdx buy_gift <marketplace> <id>` (to your owner) or `gdx buy_gift <marketplace> <id> @username` |
 | Send from the Gram wallet | `gdx gram_send 2 alice.ton` or `gdx gram_send 5 UQ... USDT` |
 | Swap in the Gram wallet | `gdx gram_swap 3 GRAM USDT` |
+| Private AI: your credit, keys and what each spent | `gdx ai` |
+| Models, where each runs and its price | `gdx ai_models qwen` or `gdx ai_models --private-only` |
+| Ask a model | `gdx ai_ask "What is a limit order?"` |
+| Buy Private AI credit with your own money | `gdx ai_add_credit 5` or `gdx ai_add_credit 5 gram_wallet` |
+| An API key for your own tools | `gdx ai_new_key "research bot"`, later `gdx ai_revoke_key <id>` |
 | Give money back to your owner | `gdx return_to_owner` (everything) or `gdx return_to_owner USDC 20` |
 | Check an approval | `gdx approval <id>` |
 | Help for one command | `gdx help swap` |
@@ -136,12 +142,33 @@ Hyperliquid and Aster are perpetual futures exchanges. Once your owner turns per
 - Hyperliquid and Aster are third parties. GhosterDex runs neither and cannot reverse anything that happens there.
 - Kit 1.6.0's `aster_*` commands still work, as the perps commands on Aster.
 
+## Private AI: models you pay for yourself
+
+Private AI is GhosterDex's set of language models, from NEAR AI and from Cocoon, Telegram's confidential network. You can ask them from the kit, or use them as your own model through an API key, and you pay for them yourself.
+
+- **Private or not:** most models run inside secure hardware, so what you send stays private. Some are their makers' own models, reached through NEAR AI and run on the makers' servers: those are **not private**. `gdx ai_models` says which is which, where each runs and its price; every `ai_ask` answer says whether its model was private.
+- **Credit:** answers are paid by the tokens they use, at each model's price per million tokens, from prepaid credit. A short question costs a fraction of a cent. `gdx ai` shows what is left.
+- **Buying credit:** `gdx ai_add_credit <dollars>`, from $1 to $1,000 in whole cents. It is paid privately from your vault, with a stablecoin first (the route costs a little over the credit), or, when the vault cannot cover it, from your Gram wallet on chain: Gram at its price with no bridge. Name the purse or coin as the second word or with `--pay-with`: a vault coin like `USDC`, `vault`, `gram_wallet`, or `cocoon` for the Gram wallet's COCOON at a discount. GhosterDex adds the credit once the payment lands, even if the kit stops watching (`gdx track_order ai_credit <orderId>`). Credit is spent on answers, never paid back out, so buy what you will use.
+- **Your owner's rules:** buying credit is a purchase, under **Purchases**, the daily limit and the approval size, like Stars or a gift. A paused agent cannot buy credit; it can still use what it has.
+- **The API:** `gdx ai_new_key "<name>"` makes a key, shown once. Use it with any tool that speaks OpenAI's chat completions, streaming included: base URL `https://ghosterdex.com/api/ai/v1`, the key as the API key, and a model id from `ai_models`. Requests are paid from the same credit. You can hold up to 10 keys; `gdx ai` shows what each spent, and `gdx ai_revoke_key <id>` stops one at once. Keep a key like a password: in an environment variable or a secret store, never in a public file, a chat or a prompt.
+- **When credit runs out:** `ai_ask` answers `no_credit`, and the API answers 429 `insufficient_quota`. Add credit and carry on.
+- **What is kept:** nothing of what you ask or what comes back, only counts of tokens to price it. A question carrying a recovery phrase or a key is refused, and so is an answer carrying one.
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(base_url="https://ghosterdex.com/api/ai/v1", api_key=os.environ["GHOSTERDEX_AI_KEY"])
+reply = client.chat.completions.create(model="<a model id from gdx ai_models>", messages=[{"role": "user", "content": "Hello"}])
+print(reply.choices[0].message.content)
+```
+
 ## Your owner's rules
 
 After pairing, your owner decides, in their app:
 
 - **Trading** on or off (swaps, limit orders, stocks, Earn).
-- **Shopping** on or off (Stars, Premium, gifts).
+- **Purchases** on or off (Stars, Premium, gifts, Private AI credit).
 - **Sending to others** on or off. When off, money leaves only to your owner.
 - A **daily limit** in dollars for money leaving to anyone but them.
 - **Approval** above a size: such a move waits until they tap Approve (up to about 90 seconds, then you get an approval id to check later).
@@ -184,6 +211,8 @@ Refusals come back as `{"error": ..., "code": ..., "hint": ...}`.
 | `insufficient`, `no_balance`, `gram_short` | Not enough money, or not enough Gram for on-chain fees. |
 | `balance_unavailable` | The vault could not be read just now, so nothing moved. Try again in a moment. |
 | `switched_off` | Your owner switched your Gram wallet's key off. Only they can move it now. |
+| `no_credit` | Your Private AI credit is used up. Add some with `gdx ai_add_credit`. |
+| `ai_closed` | Private AI is not open to this account yet. |
 
 ## Protocol (for agents that sign on their own)
 
@@ -197,5 +226,7 @@ The kit is the easy way. Underneath, you are an ordinary GhosterDex wallet: an E
 5. Owner control: work out your owner's Gram wallets yourself from the pinned `owner.key` (Wallet v5, mainnet, workchain 0, subwallet 0; and v4R2, wallet id 698983191). If `owner.gramAddress` is one of them and `GET /api/ton/w5control?address=<your Gram wallet>` does not list it, sign a Wallet v5 `add_extension` for it and `POST /api/ton/send {"boc"}`. Never add any other address. After you pair with a new owner, sign `remove_extension` for the previous owner's wallet, so only the current owner can act for yours; never remove your current owner's.
 
 6. Perps on Aster (optional): your trading key is `keccak256(seed || "ghosterdex agent trading v1")`, where `seed` is the first 32 bytes of your Ed25519 secret key (hash again while it is not a valid secp256k1 key). Its order key is `keccak256(tradingKey || "ghosterdex agent aster orders v1")` and its withdraw key `keccak256(tradingKey || "ghosterdex aster withdraw v1")`, each approved on Aster by the trading key (`POST /fapi/v3/registerAndApproveAgent`; the withdraw key with `canWithdraw` only). Name the trading address to GhosterDex once: `POST /api/agent/v1/aster {"address", "signature"}`, the signature an Ethereum personal message by the trading key over these lines joined by newlines: `GhosterDex agent trading address`, `Agent: <your vault key>`, `Address: <the address, lowercase>`. Vault money for Aster goes there as a withdrawal of USDT or BNB on BNB Chain, under your owner's rules. The same trading key is your Hyperliquid account: fund it with a withdrawal of USDC on HyperCore (`1cs_v1:hypercore:erc20:0xb88339CB7199b77E23DB6E890353E22632Ba630f`) to the trading address, sign orders as Hyperliquid actions with the trading key itself, and withdraw with `withdraw3` to a vault deposit route (`POST /api/quote {"kind": "deposit"}` for USDC on Arbitrum, recipient and refundTo the trading address).
+
+7. Private AI (optional): `GET /api/ai/account` (credit, models, keys), `POST /api/ai/chat {"messages", "model"}`, `POST /api/ai/keys {"name"}` and `POST /api/ai/keys/revoke {"id"}`. Credit from the vault: `POST /api/ai/credit/order {"usd", "payAssetId"}`, then `POST /api/quote {"kind": "boxpay", "originAssetId", "destinationAssetId", "amount", "orderId"}` with the order's figures, then bind the route to the order with `GET /api/ai/credit/status?orderId=&routeId=<depositAddress>` before you sign, then sign and execute as above. From the Gram wallet: `POST /api/ai/credit/order {"usd", "payFrom": "gram"}`, then `POST /api/agent/v1/gate {"kind": "order", "order": "<orderId>"}`, then send exactly `amountRaw` nanoGram to its `payTo` with the text comment `memo`. Follow either with the status route until it says `DELIVERED`.
 
 The kit's source is readable in the file itself. The exact byte layouts of both signatures are in its `sign` section.

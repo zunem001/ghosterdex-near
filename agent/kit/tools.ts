@@ -14,6 +14,7 @@ import { createKeystore, DEFAULT_SERVER, hasKeystore, loadKeystore, ownerGramWal
 import { KIT_VERSION } from './client';
 import { pinOwner, sealingOff } from './seal';
 import { perpsCancel, perpsClose, perpsDeposit, perpsMarkets, perpsOrder, perpsStatus, perpsWithdraw } from './perps';
+import { aiAddCredit, aiAsk, aiModelList, aiNewKey, aiRevokeKey, aiSummary } from './ai';
 
 type Schema = {
   type: 'object';
@@ -556,14 +557,18 @@ export function buildTools(): Tool[] {
     },
     {
       name: 'track_order',
-      title: 'A Stars, Premium or gift order',
-      description: 'The state of a Stars, Premium or gift order.',
-      input: obj({ product: { type: 'string', description: 'stars, premium or gifts', enum: ['stars', 'premium', 'gifts'] }, order_id: S('The orderId from the purchase.') }, ['product', 'order_id']),
+      title: 'A Stars, Premium, gift or credit order',
+      description: 'The state of a Stars, Premium, gift or Private AI credit order.',
+      input: obj(
+        { product: { type: 'string', description: 'stars, premium, gifts or ai_credit', enum: ['stars', 'premium', 'gifts', 'ai_credit'] }, order_id: S('The orderId from the purchase.') },
+        ['product', 'order_id'],
+      ),
       args: ['product', 'order_id'],
       readOnly: true,
       async run(a) {
         const p = String(a.product);
-        const path = p === 'gifts' ? '/api/gifts/order/status' : `/api/${p === 'premium' ? 'premium' : 'stars'}/order/status`;
+        const path =
+          p === 'ai_credit' ? '/api/ai/credit/status' : p === 'gifts' ? '/api/gifts/order/status' : `/api/${p === 'premium' ? 'premium' : 'stars'}/order/status`;
         return kit().c.call(`${path}?orderId=${encodeURIComponent(String(a.order_id))}`);
       },
     },
@@ -742,6 +747,73 @@ export function buildTools(): Tool[] {
       readOnly: true,
       async run() {
         return kit().c.call('/api/agent/v1/factory');
+      },
+    },
+    {
+      name: 'ai',
+      title: 'My Private AI',
+      description:
+        "Private AI: GhosterDex's models for you to use (NEAR AI's and Cocoon's), paid by the tokens used from credit this account buys with its own money. Shows the credit left, how many models are private, your API keys with what each spent, the API's address, and what to do next.",
+      input: obj({}),
+      readOnly: true,
+      async run() {
+        return aiSummary(kit());
+      },
+    },
+    {
+      name: 'ai_models',
+      title: 'Private AI models',
+      description:
+        "Every model you can use, private ones first: where each runs (secure hardware, or its maker's own servers, which are not private) and its price in dollars per million tokens in and out. Filter by part of a name, or private_only.",
+      input: obj({ search: S('Part of a model name or maker, like qwen or deepseek. Optional.'), private_only: { type: 'boolean', description: 'Only models that run in secure hardware.' } }),
+      args: ['search'],
+      readOnly: true,
+      async run(a) {
+        return aiModelList(kit(), a);
+      },
+    },
+    {
+      name: 'ai_ask',
+      title: 'Ask Private AI',
+      description:
+        "One question to a model, private when the model is, paid by the tokens used from this account's credit (a short question costs a fraction of a cent). Up to 2,000 characters; for conversations and longer work, make an API key with ai_new_key. Never put a recovery phrase or a key in a question.",
+      input: obj({ question: S('What to ask.'), model: S('A model id from ai_models. Optional; the default is private and quick.') }, ['question']),
+      args: ['question'],
+      async run(a) {
+        return aiAsk(kit(), a);
+      },
+    },
+    {
+      name: 'ai_add_credit',
+      title: 'Add Private AI credit',
+      description:
+        "Buys Private AI credit with this account's own money, $1 to $1,000, and follows it until the credit is added; ai_ask and your API keys spend it. Paid privately from the vault (a stablecoin first) unless the vault cannot cover it, then from the Gram wallet on chain. pay_with picks: a vault coin like USDC, vault, gram_wallet for the Gram wallet's Gram, or cocoon for its COCOON at a discount. A purchase under your owner's rules: Purchases, the daily limit and approvals apply.",
+      input: obj({ usd: N('Dollars of credit, like 5 or 12.50.'), pay_with: S('A vault coin (USDC, USDT, GRAM...), vault, gram_wallet, or cocoon. Optional.') }, ['usd']),
+      args: ['usd', 'pay_with'],
+      movesMoney: true,
+      async run(a) {
+        return obeyed((k) => aiAddCredit(k, a, 150_000));
+      },
+    },
+    {
+      name: 'ai_new_key',
+      title: 'Make a Private AI API key',
+      description:
+        "An API key for your own tools: OpenAI's chat completions at GhosterDex's address, any model from ai_models, streaming included, paid from this account's credit. Shown once; keep it like a password. Up to 10 keys.",
+      input: obj({ name: S('A name to know it by, like "research bot". Optional.') }),
+      args: ['name'],
+      async run(a) {
+        return aiNewKey(kit(), a);
+      },
+    },
+    {
+      name: 'ai_revoke_key',
+      title: 'Revoke a Private AI API key',
+      description: 'Stops an API key at once, by its id from ai.',
+      input: obj({ id: S('The key id, like k1a2b3c4d5e6f.') }, ['id']),
+      args: ['id'],
+      async run(a) {
+        return aiRevokeKey(kit(), a);
       },
     },
     {

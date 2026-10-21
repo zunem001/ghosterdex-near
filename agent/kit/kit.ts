@@ -653,7 +653,7 @@ export class Kit {
         agent_owner_only: 'Send to your owner instead (to: "owner"), or ask them to allow sending to others.',
         agent_daily_limit: 'Wait until tomorrow (UTC), or ask your owner to raise the daily limit.',
         agent_no_trade: 'Ask your owner to turn trading on in GhosterDex, Explore.',
-        agent_no_shop: 'Ask your owner to turn shopping on.',
+        agent_no_shop: 'Ask your owner to turn purchases on in GhosterDex, Explore.',
       };
       return new KitError(e.message, { code: code || `http_${e.status}`, hint: code ? hints[code] : undefined, data: e.body });
     }

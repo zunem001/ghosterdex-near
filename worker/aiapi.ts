@@ -383,7 +383,10 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
   const hold = await ledger({ op: 'hold', micro: chargeMicro(model, inMax, clean.maxTokens), key: idx.id, free, ...(free ? { freeCap: freeDayMicro(env) } : {}) });
   if (!hold.ok) {
     if (hold.why === 'key_off') return oaiError(401, 'That API key was revoked.', 'invalid_api_key');
-    if (hold.why === 'no_credit') return oaiError(429, 'Not enough credit for this request. Add credit in GhosterDex: Explore, AI services, Private AI.', 'insufficient_quota', 'insufficient_quota');
+    if (hold.why === 'no_credit') {
+      /* an agent's key is topped up by the agent itself, from its own wallet (agent/kit/ai.ts) */
+      return oaiError(429, 'Not enough credit for this request. Add credit in GhosterDex: Explore, AI services, Private AI. An agent adds its own with gdx ai_add_credit.', 'insufficient_quota', 'insufficient_quota');
+    }
     if (hold.why === 'free_cap') return oaiError(429, "The free keys reached today's limit. It opens again at midnight UTC.", 'free_limit', 'insufficient_quota');
     return oaiError(503, 'Billing is not available right now.', 'unavailable', 'server_error');
   }

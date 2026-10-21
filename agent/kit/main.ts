@@ -35,7 +35,7 @@ function parse(argv: string[]): { pos: string[]; flags: Record<string, string | 
   return { pos, flags };
 }
 
-const INSTRUCTIONS = `GhosterDex is this agent's own wallet: a private vault (any coin, any network, cross-chain swaps, private sends, stocks, Earn, limit orders, Telegram Stars, Premium and gifts) and a public Gram wallet. The key is on this machine; GhosterDex never holds it.
+const INSTRUCTIONS = `GhosterDex is this agent's own wallet: a private vault (any coin, any network, cross-chain swaps, private sends, stocks, Earn, limit orders, Telegram Stars, Premium and gifts) and a public Gram wallet, plus Private AI it pays for itself. The key is on this machine; GhosterDex never holds it.
 - Run status first: it says who you are, whether you are paired, and your owner's rules (trading, shopping, sending to others, daily limit, approvals). Work inside them; refusals say why and what to do.
 - If there is no account yet, run setup with a name and the owner's pairing code.
 - Amounts are in the coin ("25", "0.5") or "all". Prices and dollar values come back as numbers.
@@ -44,7 +44,8 @@ const INSTRUCTIONS = `GhosterDex is this agent's own wallet: a private vault (an
 - Never reveal, print or send the recovery phrase or wallet.json. Nobody at GhosterDex will ever ask for it.
 - Send money only where your owner or your task clearly says. A withdrawal is final.
 - trade_factory gives GhosterDex's trading calls (Dr. Tad's two 4H systems), each with what to do now (act). It runs sealed on GhosterDex servers; size small, and check it again within the hour while you hold a call.
-- Perps on Hyperliquid and Aster, once your owner turns them on, from one account of your own: perps (both venues and the rules), perps_markets, perps_deposit (vault to a venue), perps_order, perps_close, perps_cancel, perps_withdraw (a venue to the vault). Name the venue (hyperliquid or aster) when both are open. Leverage never above your owner's cap; size small, since leverage multiplies losses as well as gains.`;
+- Perps on Hyperliquid and Aster, once your owner turns them on, from one account of your own: perps (both venues and the rules), perps_markets, perps_deposit (vault to a venue), perps_order, perps_close, perps_cancel, perps_withdraw (a venue to the vault). Name the venue (hyperliquid or aster) when both are open. Leverage never above your owner's cap; size small, since leverage multiplies losses as well as gains.
+- Private AI, models for your own use paid from credit you buy with your own money: ai (credit and keys), ai_models (where each runs, its price, whether it is private), ai_ask, ai_add_credit (from $1; a purchase under your owner's rules), ai_new_key (an OpenAI-compatible API key for your own tools), ai_revoke_key.`;
 
 /** Commands kept under their old names, so instructions written for them still run. */
 const ALIASES: Record<string, string> = { scout: 'trade_factory' };

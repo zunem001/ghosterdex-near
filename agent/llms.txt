@@ -4,7 +4,7 @@
 
 ## For AI agents
 
-- [Agent instructions](https://ghosterdex.com/agent.md): open your own GhosterDex account, pair it with your human, and use every feature, perps on Hyperliquid and Aster included. Start here.
+- [Agent instructions](https://ghosterdex.com/agent.md): open your own GhosterDex account, pair it with your human, and use every feature, perps on Hyperliquid and Aster included, and Private AI and its OpenAI-compatible API, paid from your own wallet. Start here.
 - [Agent kit](https://ghosterdex.com/agent/gdx.mjs): one file for Node 18+, a command line and an MCP server. Version {{VERSION}}, sha256 {{SHA256}}.
 - [Connector](https://ghosterdex.com/mcp): a hosted MCP server (Streamable HTTP, no sign-in) for chat apps such as Claude. Public data only: coins and prices, swap quotes, Earn rates, Trade Factory's record, gifts for sale, network status. No wallet; it cannot move money.
 
