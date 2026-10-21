@@ -23,7 +23,7 @@
  */
 import { Address, beginCell, type Cell } from '@ton/core';
 import { aiTopupOk, AI_CREDIT_MAX, AI_CREDIT_MIN } from '../../src/lib/aiLimits';
-import { fromRaw, usd } from './amounts';
+import { fromRaw } from './amounts';
 import { ApiError } from './client';
 import { KitError, normSymbol, type Balance, type Kit } from './kit';
 
@@ -66,6 +66,8 @@ const GRAM_FEE_NANO = 20_000_000n;
 const JETTON_GAS_NANO = 50_000_000n;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Credit to the micro-dollar, as the ledger keeps it: a question costs a fraction of a cent, which cents would show as nothing. */
+const exact = (n: unknown) => Math.round((Number(n) || 0) * 1e6) / 1e6;
 const enc = encodeURIComponent;
 const iso = (ms: number | null | undefined) => (ms ? new Date(ms).toISOString() : null);
 
@@ -125,8 +127,8 @@ export async function aiSummary(k: Kit) {
   const keySpent = (a.keys || []).reduce((s, x) => s + (Number(x.spent) || 0), 0);
   const low = !a.free && a.balance < 0.05;
   return {
-    credit: usd(a.balance),
-    ...(a.held > 0 ? { heldForAnswersInFlight: usd(a.held) } : {}),
+    credit: exact(a.balance),
+    ...(a.held > 0 ? { heldForAnswersInFlight: exact(a.held) } : {}),
     ...(a.free ? { free: true } : {}),
     ready: a.ready,
     models: {
@@ -137,11 +139,11 @@ export async function aiSummary(k: Kit) {
     },
     api: {
       base: a.base,
-      keys: live.map((x) => ({ id: x.id, name: x.name, endsWith: x.last4, requests: x.requests, spentUsd: usd(x.spent), lastUsed: iso(x.lastUsed) })),
+      keys: live.map((x) => ({ id: x.id, name: x.name, endsWith: x.last4, requests: x.requests, spentUsd: exact(x.spent), lastUsed: iso(x.lastUsed) })),
       ...(live.length < (a.keys || []).length ? { revoked: (a.keys || []).length - live.length } : {}),
       how: 'OpenAI chat completions: base_url is base, api_key is a key from ai_new_key. Requests are paid from this credit.',
     },
-    spent: { chatUsd: usd(a.chat?.spent || 0), chatRequests: a.chat?.requests || 0, apiUsd: usd(keySpent) },
+    spent: { chatUsd: exact(a.chat?.spent || 0), chatRequests: a.chat?.requests || 0, apiUsd: exact(keySpent) },
     ...(a.topups?.length ? { topups: a.topups.slice(0, 5).map((t) => ({ at: iso(t.at), usd: t.usd, note: t.note })) } : {}),
     ...(a.cocoon ? { cocoonDiscountPercent: Math.round(a.cocoon.off * 100) } : {}),
     next: low
@@ -192,7 +194,7 @@ export async function aiAsk(k: Kit, a: { question?: unknown; model?: unknown }) 
     ...(m ? { private: isPrivate(m), runs: whereItRuns(m) } : {}),
     ...(model && model !== r.model ? { note: `${model} is not offered or cannot answer just now, so ${r.model} answered. ai_models lists the ids.` } : {}),
     ...(r.cut ? { cut: true } : {}),
-    ...(typeof r.balance === 'number' ? { creditLeft: usd(r.balance) } : {}),
+    ...(typeof r.balance === 'number' ? { creditLeft: exact(r.balance) } : {}),
   };
 }
 
@@ -502,7 +504,7 @@ export async function aiAddCredit(k: Kit, a: { usd?: unknown; pay_with?: unknown
     paid,
     from,
     orderId,
-    ...(now ? { creditNow: usd(now.balance) } : {}),
+    ...(now ? { creditNow: exact(now.balance) } : {}),
     ...(end.message && !added ? { message: end.message } : {}),
     ...(added || failed
       ? {}
