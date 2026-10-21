@@ -438,7 +438,11 @@ export async function aiAddCredit(k: Kit, a: { usd?: unknown; pay_with?: unknown
     const order = await placed(cocoon ? { payFrom: 'gram', payMaster: master } : { payFrom: 'gram' });
     if (!order?.orderId || order.rail !== 'chain' || !order.amountRaw || !order.routeId) throw new KitError('The order could not be placed. Nothing was charged.');
     const need = BigInt(order.amountRaw);
-    /* the coin and the network's fee are there before anything is counted or signed */
+    /* the key may sign, and the coin and the network's fee are there, before anything is counted or signed */
+    const ctl = await k.gramControl().catch(() => null);
+    if (ctl?.signatureAllowed === false) {
+      throw new KitError("Your owner switched this Gram wallet's own key off. Only your owner can move it now. Nothing was sent.", { code: 'switched_off', hint: 'Pay from the vault instead.' });
+    }
     const acctNow = await k.gramAccount();
     const gramNow = BigInt(acctNow.balance || '0');
     let jettonWallet = '';

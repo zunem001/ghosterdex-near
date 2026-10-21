@@ -777,7 +777,7 @@ export function buildTools(): Tool[] {
       title: 'Ask Private AI',
       description:
         "One question to a model, private when the model is, paid by the tokens used from this account's credit (a short question costs a fraction of a cent). Up to 2,000 characters; for conversations and longer work, make an API key with ai_new_key. Never put a recovery phrase or a key in a question.",
-      input: obj({ question: S('What to ask.'), model: S('A model id from ai_models. Optional; the default is private and quick.') }, ['question']),
+      input: obj({ question: S('What to ask.'), model: S('A model id from ai_models. Optional; ai names the default.') }, ['question']),
       args: ['question'],
       async run(a) {
         return aiAsk(kit(), a);
