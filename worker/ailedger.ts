@@ -33,7 +33,7 @@ export const MICRO = 1_000_000;
 /** an unsettled hold comes back after this long: no answer takes a quarter of an hour */
 export const HOLD_MS = 15 * 60_000;
 /** what a top-up may be, in dollars (index.ts /api/ai/credit/order): one list for the phone and the worker */
-export { AI_TOPUPS } from '../src/lib/aiLimits';
+export { AI_TOPUPS, AI_CREDIT_MAX, AI_CREDIT_MIN, aiTopupOk } from '../src/lib/aiLimits';
 /** active keys per account */
 export const MAX_KEYS = 10;
 /** kept for the screen: the latest top-ups, and revoked keys for a while */

@@ -27,6 +27,20 @@ export const AI_LIMITS = {
  */
 export const AI_TOPUPS = [1, 5, 10, 25];
 
+/**
+ * Any amount besides (owner, 2026-10-21: "users should be able to put any amount they like"): dollars in whole
+ * cents, from a dollar to this much in one top-up, a cap that turns a typo of an extra zero or two into a refusal
+ * rather than a payment. The presets above are the quick picks; the worker takes any amount this allows.
+ */
+export const AI_CREDIT_MIN = 1;
+export const AI_CREDIT_MAX = 1000;
+
+/** A top-up the worker will place: a finite number of dollars, whole cents, from AI_CREDIT_MIN to AI_CREDIT_MAX. */
+export function aiTopupOk(usd: number): boolean {
+  if (typeof usd !== 'number' || !Number.isFinite(usd) || usd < AI_CREDIT_MIN || usd > AI_CREDIT_MAX) return false;
+  return Math.abs(usd * 100 - Math.round(usd * 100)) < 1e-6;
+}
+
 export type AiTurn = { role: 'user' | 'assistant'; content: string };
 
 /**
