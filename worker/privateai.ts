@@ -286,6 +286,26 @@ export function freeChatDayMicro(env: Pick<PrivateAiEnv, 'PRIVATE_AI_FREE_CHAT_D
   return Math.round((Number.isFinite(v) && v >= 0 && v <= 1000 ? v : FREE_CHAT_DAY_USD) * MICRO);
 }
 
+/**
+ * What the app shows of the free chat (owner, 2026-10-22: "add the free label next to glm"): its model and how many
+ * free questions this account has left today, so the label is only ever shown where a question would be free. The
+ * owner's are counted on the owner's own day; an agent, or anyone who cannot be told apart from one, gets none; a
+ * spent house budget leaves none for anyone until midnight UTC.
+ */
+export async function freeChatView(ctx: PrivateAiCtx, day: string): Promise<{ model: string; left: number; perDay: number } | null> {
+  const { env, uid } = ctx;
+  const model = freeChatModel(env);
+  if (!model) return null;
+  if (ctx.isOwner) {
+    const used = Number(((await env.STATE.get(`aiuse:${uid}:${day}`, 'json').catch(() => null)) as DayUse | null)?.n) || 0;
+    return { model, left: Math.max(0, AI_LIMITS.perDay - used), perDay: AI_LIMITS.perDay };
+  }
+  if (!ctx.isAgent || (await ctx.isAgent(uid).catch(() => true))) return null;
+  const spent = freeChatDayMicro(env) <= 0 || Boolean(await env.STATE.get(`aifree:spent:${day}`).catch(() => null));
+  const n = Number(((await env.STATE.get(`aifree:${uid}:${day}`, 'json').catch(() => null)) as { n?: unknown } | null)?.n) || 0;
+  return { model, left: spent ? 0 : Math.max(0, FREE_CHAT_PER_DAY - n), perDay: FREE_CHAT_PER_DAY };
+}
+
 type FreeHold = { release: () => Promise<unknown>; settle: (micro: number, tokensIn: number, tokensOut: number) => Promise<unknown> };
 
 /**
@@ -307,7 +327,9 @@ async function freeChatHold(ctx: PrivateAiCtx, ledgerFor: (uid: string) => Ledge
   if (!house || cap <= 0) return null;
   const held = await house({ op: 'hold', micro: bound, key: 'chat', free: true, freeCap: cap });
   if (!held.ok) {
-    /* the day's budget is spent: the owner hears it once a day, as the free chat then costs its askers credit */
+    /* the day's budget is spent: the Free label comes off for the rest of the day (freeChatView), and the owner
+       hears it once a day, as the free chat then costs its askers credit */
+    if (held.why === 'free_cap') await env.STATE.put(`aifree:spent:${day}`, '1', { expirationTtl: 2 * 86400 }).catch(() => {});
     if (held.why === 'free_cap' && ctx.alert && !(await env.STATE.get(`aifree:told:${day}`).catch(() => null))) {
       await env.STATE.put(`aifree:told:${day}`, '1', { expirationTtl: 2 * 86400 }).catch(() => {});
       await ctx
@@ -433,6 +455,8 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
       chat: view.chat,
       topups: view.topups,
       cocoon: ctx.cocoon || null,
+      /* the free chat's model and what this account has left of it today, for its Free label (null: none for it) */
+      freeChat: await freeChatView(ctx, new Date(now).toISOString().slice(0, 10)),
     });
   }
 
