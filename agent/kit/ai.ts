@@ -27,7 +27,7 @@ import { fromRaw } from './amounts';
 import { ApiError } from './client';
 import { KitError, normSymbol, type Balance, type Kit } from './kit';
 
-export type AiModel = { id: string; name: string; net: string; tier: string; maker: string; inPerM: number; outPerM: number; ready: boolean; tag?: string };
+export type AiModel = { id: string; name: string; net: string; tier: string; maker: string; inPerM: number; outPerM: number; ready: boolean; tag?: string; tools?: boolean; context?: number };
 
 type AiKeyRow = { id: string; name: string; last4: string; created: number; revoked: number | null; requests: number; spent: number; lastUsed: number | null };
 
@@ -168,11 +168,13 @@ export async function aiModelList(k: Kit, a: { search?: unknown; private_only?: 
       maker: m.maker,
       private: isPrivate(m),
       runs: whereItRuns(m),
+      tools: m.tools === true,
+      ...(m.context ? { contextTokens: m.context } : {}),
       usdPerMillionIn: m.inPerM,
       usdPerMillionOut: m.outPerM,
       ...(m.tag ? { tag: m.tag } : {}),
     })),
-    note: 'Pass an id as model to ai_ask, or as model to the API. A model that is not private sees what you send it.',
+    note: 'Pass an id as model to ai_ask, or as model to the API. tools: true means it takes tools (function calling) through the API, so an agent can think with it. A model that is not private sees what you send it.',
   };
 }
 
@@ -222,7 +224,7 @@ export async function aiNewKey(k: Kit, a: { name?: unknown }) {
           },
         }
       : {}),
-    note: 'Any tool that speaks OpenAI chat completions works, streaming too. Each request is paid from the same credit as ai_ask; ai shows what each key spent, and ai_revoke_key stops one at once.',
+    note: 'Any tool that speaks OpenAI chat completions works, streaming and tool calls too (on models ai_models marks tools: true). Each request is paid from the same credit as ai_ask; ai shows what each key spent, and ai_revoke_key stops one at once.',
   };
 }
 

@@ -69,6 +69,9 @@ export async function aiModels(env: AiModelsEnv, fetcher: typeof fetch = fetch):
     params: [],
     reasons: false,
     think: null,
+    /* TON Console's gateway has not said it takes tools; Qwen3 32B reads 32k tokens natively */
+    tools: false,
+    context: 32_768,
   };
   /* one id names one model: should NEAR AI ever list Cocoon's, Cocoon's own entry is the one kept */
   return [...near.filter((m) => m.id !== id), cocoon];
@@ -140,5 +143,8 @@ export function publicModel(m: AiModel) {
     outPerM: m.outPerM,
     ready: m.ready,
     ...(m.tag ? { tag: m.tag } : {}),
+    /* what an agent picks a model by: tools (function calling) and how much it reads */
+    tools: m.tools === true,
+    ...(m.context ? { context: m.context } : {}),
   };
 }

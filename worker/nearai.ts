@@ -51,6 +51,10 @@ export interface AiModel {
   /** it thinks before it answers, which counts as answer tokens */
   reasons: boolean;
   think: AiThink;
+  /** it takes tools (function calling), as its network lists the feature: what an agent needs of a model */
+  tools?: boolean;
+  /** the most tokens it reads in one request, as its network says; absent when not known */
+  context?: number;
 }
 
 /** The private models by name, in the order the menu lists them, with what each is good at. Others keep NEAR AI's own name. */
@@ -158,6 +162,8 @@ export function parseCatalogue(raw: unknown, margin = 0): AiModel[] {
       params,
       reasons: features.includes('reasoning') || /^moonshotai\/kimi-k2/i.test(id),
       think: thinkOf(id, tier),
+      tools: features.includes('tools'),
+      context: Math.floor(Number(md.contextLength)),
     });
   }
   /* the private ones first, in the menu's own order; then every other by maker and name */
@@ -272,6 +278,11 @@ export function shapeFor(model: AiModel, base: Record<string, unknown>, opts: { 
     if (k === 'model' || k === 'messages' || v === undefined) continue;
     if (k === 'stream' || k === 'stream_options' || k === 'response_format' || k === 'reasoning_effort' || k === 'chat_template_kwargs') {
       body[k] = v;
+      continue;
+    }
+    /* an agent's tools go only to a model that takes them (the API refuses them for any other before this) */
+    if (k === 'tools' || k === 'tool_choice' || k === 'parallel_tool_calls') {
+      if (model.tools === true) body[k] = v;
       continue;
     }
     /* a sampling setting goes only to a model that lists it (NEAR AI's catalogue); a Cocoon model takes them all */
