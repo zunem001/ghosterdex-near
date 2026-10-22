@@ -28,7 +28,10 @@
  *    aiuse:<uid>:<day> for the owner's free use), to price what an answer costs.
  *  - what it costs: the tokens used, from the account's prepaid credit
  *    (worker/ailedger.ts), the same credit its API keys spend (worker/aiapi.ts).
- *    The owner's use is free and still counted.
+ *    The owner's use is free and still counted. The app's chat with one model,
+ *    PRIVATE_AI_FREE_CHAT (GLM 5.3 Flash), is free for every person (owner,
+ *    2026-10-22), within a day's allowance an account and a day's budget for
+ *    everyone together; agents and API keys pay for it as before.
  *
  * The account's side of the API lives here too: its credit and price
  * (/api/ai/account), making and revoking keys (/api/ai/keys), and the owner's
@@ -54,6 +57,10 @@ export interface PrivateAiEnv extends AiModelsEnv {
   AI_DO?: AiLedgerNs;
   /** 'owner' the owner alone, '1' every verified account, else off */
   PRIVATE_AI?: string;
+  /** the model the app's chat answers free with, for every person; unset or empty, nothing is free */
+  PRIVATE_AI_FREE_CHAT?: string;
+  /** what that free chat may cost the house in a UTC day, everyone together, in dollars (FREE_CHAT_DAY_USD unless set) */
+  PRIVATE_AI_FREE_CHAT_DAY?: string;
 }
 
 /** Cocoon's model, unless PRIVATE_AI_MODEL names another */
@@ -250,6 +257,75 @@ type DayUse = { n: number; in: number; out: number };
 
 const usd = (micro: unknown) => Math.round(Number(micro || 0)) / MICRO;
 
+/* ------------------------------------------------------------------ the free chat */
+
+/**
+ * The app's chat with one model is free for every person (owner, 2026-10-22: "make the glm 5.3 model free for
+ * everyone in the app so they can ask questions in the app, but every other thing remains the same"). No credit
+ * is held or spent, and nothing is written to the person's ledger, so their credit and what it went to read as
+ * before. Two bounds keep a script from spending the house's NEAR AI credit without end: FREE_CHAT_PER_DAY
+ * questions an account a UTC day, and the day's free spend for everyone together, held in the house's own ledger
+ * (one Durable Object, so concurrent questions cannot overrun it). Past either, a question is paid from the
+ * person's credit exactly as before. Agents pay for their questions (their kit's ai_ask), as API keys do.
+ */
+export const FREE_CHAT_PER_DAY = 50;
+/** the day's free spend for everyone together, unless PRIVATE_AI_FREE_CHAT_DAY says otherwise */
+export const FREE_CHAT_DAY_USD = 10;
+/** the house's own ledger, which holds the day's free chat; never a person's account (theirs are tg- and ton-) */
+export const FREE_CHAT_HOUSE = 'house:freechat';
+
+/** The free chat's model, or '' when nothing is free. */
+export function freeChatModel(env: Pick<PrivateAiEnv, 'PRIVATE_AI_FREE_CHAT'>): string {
+  return String(env.PRIVATE_AI_FREE_CHAT || '').trim();
+}
+
+/** What the free chat may cost the house in a UTC day, in whole micro-dollars; a figure that is not one reads as the default. */
+export function freeChatDayMicro(env: Pick<PrivateAiEnv, 'PRIVATE_AI_FREE_CHAT_DAY'>): number {
+  const raw = String(env.PRIVATE_AI_FREE_CHAT_DAY ?? '').trim();
+  const v = raw === '' ? NaN : Number(raw);
+  return Math.round((Number.isFinite(v) && v >= 0 && v <= 1000 ? v : FREE_CHAT_DAY_USD) * MICRO);
+}
+
+type FreeHold = { release: () => Promise<unknown>; settle: (micro: number, tokensIn: number, tokensOut: number) => Promise<unknown> };
+
+/**
+ * A question's place in the free chat: held against the house's day budget, its count kept per account. Null when
+ * the question is not free (another model, an agent, the account's allowance spent, the house's budget spent), and
+ * then it is paid as before. A failed answer releases the hold and counts nothing against the person.
+ */
+async function freeChatHold(ctx: PrivateAiCtx, ledgerFor: (uid: string) => Ledger | null, model: AiModel, bound: number, day: string): Promise<FreeHold | null> {
+  const { env, uid } = ctx;
+  const id = freeChatModel(env);
+  if (!id || model.id !== id) return null;
+  /* who cannot be told apart from an agent is not given it: a failed look pays, as everything did before */
+  if (!ctx.isAgent || (await ctx.isAgent(uid).catch(() => true))) return null;
+  const key = `aifree:${uid}:${day}`;
+  const n = Number(((await env.STATE.get(key, 'json').catch(() => null)) as { n?: unknown } | null)?.n) || 0;
+  if (n >= FREE_CHAT_PER_DAY) return null;
+  const cap = freeChatDayMicro(env);
+  const house = ledgerFor(FREE_CHAT_HOUSE);
+  if (!house || cap <= 0) return null;
+  const held = await house({ op: 'hold', micro: bound, key: 'chat', free: true, freeCap: cap });
+  if (!held.ok) {
+    /* the day's budget is spent: the owner hears it once a day, as the free chat then costs its askers credit */
+    if (held.why === 'free_cap' && ctx.alert && !(await env.STATE.get(`aifree:told:${day}`).catch(() => null))) {
+      await env.STATE.put(`aifree:told:${day}`, '1', { expirationTtl: 2 * 86400 }).catch(() => {});
+      await ctx
+        .alert(`ℹ️ <b>Private AI: the free chat's day is spent</b>\nToday's $${usd(cap).toFixed(2)} of free questions is used. Until midnight UTC, the free model is paid from each person's credit. PRIVATE_AI_FREE_CHAT_DAY sets the day's budget.`)
+        .catch(() => {});
+    }
+    return null;
+  }
+  const hold = String(held.hold);
+  return {
+    release: () => house({ op: 'release', hold }),
+    settle: async (micro, tokensIn, tokensOut) => {
+      await house({ op: 'settle', hold, micro, key: 'chat', tokensIn, tokensOut, free: true });
+      await env.STATE.put(key, JSON.stringify({ n: n + 1 }), { expirationTtl: 3 * 86400 }).catch(() => {});
+    },
+  };
+}
+
 /** An account's credit, its keys with what each spent, its chat and its top-ups. Never a key, nor a key's hash. */
 export type AiAccountView = {
   balance: number;
@@ -310,6 +386,8 @@ export interface PrivateAiCtx {
   now?: number;
   /** a message to the owner (index.ts ownerTelegram): a network out of the house's credit */
   alert?: (text: string) => Promise<unknown>;
+  /** a paired agent (agents.ts agentCard): it pays for its questions, the free chat is for people */
+  isAgent?: (uid: string) => Promise<boolean>;
 }
 
 const ROUTES = new Set(['/api/ai/chat', '/api/ai/account', '/api/ai/keys', '/api/ai/keys/revoke', '/api/ai/price', '/api/ai/grant']);
@@ -425,7 +503,20 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
   const useKey = `aiuse:${uid}:${day}`;
   const used = free ? ((await env.STATE.get(useKey, 'json').catch(() => null)) as DayUse | null) || { n: 0, in: 0, out: 0 } : null;
   if (used && used.n >= AI_LIMITS.perDay) return refuse(refusal('daily'));
-  const hold = await ledger({ op: 'hold', micro: chargeMicro(model, inputBound([systemFor(model), ...clean.turns.map((t) => t.content)]), answerCap(model)), key: 'chat', free });
+  const bound = chargeMicro(model, inputBound([systemFor(model), ...clean.turns.map((t) => t.content)]), answerCap(model));
+  /* the free chat (freeChatHold): the house holds it, the person's ledger is not touched */
+  const gift = free ? null : await freeChatHold(ctx, ledgerFor, model, bound, day);
+  if (gift) {
+    const got = await askModel(env, clean.turns, model, ctx.fetcher);
+    if ('error' in got) {
+      await gift.release();
+      if (got.upstream === 402) await noteUpstreamCredit(env, model, ctx.alert);
+      return refuse(got);
+    }
+    await gift.settle(chargeMicro(model, got.tokensIn, got.tokensOut, got.cached), got.tokensIn, got.tokensOut);
+    return json({ reply: got.reply, model: got.model, cut: got.cut, free: true });
+  }
+  const hold = await ledger({ op: 'hold', micro: bound, key: 'chat', free });
   if (!hold.ok) return refuse(refusal(hold.why === 'no_credit' ? 'no_credit' : 'billing'));
   const holdId = String(hold.hold);
   const got = await askModel(env, clean.turns, model, ctx.fetcher);
