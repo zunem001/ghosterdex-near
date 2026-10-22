@@ -250,6 +250,49 @@ type DayUse = { n: number; in: number; out: number };
 
 const usd = (micro: unknown) => Math.round(Number(micro || 0)) / MICRO;
 
+/** An account's credit, its keys with what each spent, its chat and its top-ups. Never a key, nor a key's hash. */
+export type AiAccountView = {
+  balance: number;
+  held: number;
+  keys: Array<{ id: string; name: string; last4: string; created: number; revoked: number | null; requests: number; spent: number; lastUsed: number | null }>;
+  chat: { requests: number; spent: number };
+  topups: Array<{ at: number; usd: number; note: string }>;
+};
+
+/** What /api/ai/account shows an account of itself, and what an agent's owner reads of it (worker/agents.ts). */
+export async function aiAccountView(ledger: Ledger): Promise<AiAccountView | null> {
+  const st = await ledger({ op: 'state' });
+  if (!st.ok) return null;
+  const use = (st.use || {}) as Record<string, AiUse>;
+  return {
+    balance: usd(st.bal),
+    held: usd(st.held),
+    keys: ((st.keys || []) as AiKey[]).map((k) => ({
+      id: k.id,
+      name: k.name,
+      last4: k.last4,
+      created: k.created,
+      revoked: k.revoked || null,
+      requests: use[k.id]?.n || 0,
+      spent: usd(use[k.id]?.micro),
+      lastUsed: use[k.id]?.last || null,
+    })),
+    chat: { requests: use.chat?.n || 0, spent: usd(use.chat?.micro) },
+    topups: ((st.topups || []) as Array<{ at: number; micro: number; note: string }>).map((t) => ({ at: t.at, usd: usd(t.micro), note: t.note })),
+  };
+}
+
+/** Stops a key at once: the ledger first, which every request asks, then the index, so it is not even looked up again. */
+export async function revokeAiKey(env: Pick<PrivateAiEnv, 'STATE'>, ledger: Ledger, id: string): Promise<'ok' | 'no_key' | 'billing'> {
+  if (!/^k[0-9a-f]{12}$/.test(id)) return 'no_key';
+  const st = await ledger({ op: 'state' });
+  const hash = ((st.keys || []) as AiKey[]).find((k) => k.id === id)?.hash;
+  const r = await ledger({ op: 'revokeKey', id });
+  if (!r.ok) return r.why === 'no_key' ? 'no_key' : 'billing';
+  if (hash) await env.STATE.delete(`aikey:${hash}`).catch(() => {});
+  return 'ok';
+}
+
 export interface PrivateAiCtx {
   env: PrivateAiEnv;
   request: Request;
@@ -293,24 +336,13 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
 
   if (path === '/api/ai/account') {
     if (!ledger) return refuse(refusal('billing'));
-    const st = await ledger({ op: 'state' });
-    if (!st.ok) return refuse(refusal('billing'));
-    const use = (st.use || {}) as Record<string, AiUse>;
-    const keys = ((st.keys || []) as AiKey[]).map((k) => ({
-      id: k.id,
-      name: k.name,
-      last4: k.last4,
-      created: k.created,
-      revoked: k.revoked || null,
-      requests: use[k.id]?.n || 0,
-      spent: usd(use[k.id]?.micro),
-      lastUsed: use[k.id]?.last || null,
-    }));
+    const view = await aiAccountView(ledger);
+    if (!view) return refuse(refusal('billing'));
     const models = await aiModels(env, ctx.fetcher);
     return json({
       free: ctx.isOwner,
-      balance: usd(st.bal),
-      held: usd(st.held),
+      balance: view.balance,
+      held: view.held,
       /* Cocoon's price, which the owner sets; NEAR AI's models carry their own */
       price: await aiPrice(env),
       /* the API is served over https only (plain http is redirected), whatever scheme reached this request */
@@ -319,9 +351,9 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
       models: models.map(publicModel),
       ...(ctx.isOwner ? { margin: await nearMargin(env) } : {}),
       ready: privateAiReady(env),
-      keys,
-      chat: { requests: use.chat?.n || 0, spent: usd(use.chat?.micro) },
-      topups: ((st.topups || []) as Array<{ at: number; micro: number; note: string }>).map((t) => ({ at: t.at, usd: usd(t.micro), note: t.note })),
+      keys: view.keys,
+      chat: view.chat,
+      topups: view.topups,
       cocoon: ctx.cocoon || null,
     });
   }
@@ -343,14 +375,8 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
 
   if (path === '/api/ai/keys/revoke') {
     if (!ledger) return refuse(refusal('billing'));
-    const id = String(body?.id || '');
-    if (!/^k[0-9a-f]{12}$/.test(id)) return refuse(refusal('no_key'));
-    const st = await ledger({ op: 'state' });
-    const hash = ((st.keys || []) as AiKey[]).find((k) => k.id === id)?.hash;
-    const r = await ledger({ op: 'revokeKey', id });
-    if (!r.ok) return refuse(refusal(r.why === 'no_key' ? 'no_key' : 'billing'));
-    /* the ledger stopped it already; the index goes too, so the key is not even looked up again */
-    if (hash) await env.STATE.delete(`aikey:${hash}`).catch(() => {});
+    const r = await revokeAiKey(env, ledger, String(body?.id || ''));
+    if (r !== 'ok') return refuse(refusal(r));
     return json({ ok: true });
   }
 
