@@ -9,7 +9,7 @@
 import { tonProof } from './sign';
 import { keysOf, saveKeystore, type Keystore } from './wallet';
 
-export const KIT_VERSION = '1.8.1';
+export const KIT_VERSION = '1.9.0';
 const RENEW_BEFORE_S = 2 * 24 * 3600;
 
 export class ApiError extends Error {

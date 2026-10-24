@@ -237,6 +237,73 @@ export async function aiRevokeKey(k: Kit, a: { id?: unknown }) {
   return { ok: true, revoked: id, note: 'The key stopped working at once.' };
 }
 
+/* ------------------------------------------------------------- usage */
+
+type UsageRow = { id: string; at: number; model: string; source: string; in: number; out: number; cached: number; cost: number; worth: number; free?: 'owner' | 'gift'; ms?: number; flag?: 'hung' | 'uncounted' };
+type UsageView = {
+  period: string;
+  totals: { requests: number; in: number; out: number; cached: number; cost: number; worth: number };
+  models: Array<{ id: string; private: boolean; worth: number }>;
+  sources: Array<{ id: string; name: string; last4: string; revoked: boolean; worth: number }>;
+  rows: UsageRow[];
+  next: string | null;
+};
+
+/** ai_ask's questions are the account's chat to GhosterDex; an agent knows them by the tool that asked them. */
+const sourceName = (id: string) => (id === 'chat' ? 'ai_ask' : id);
+
+/**
+ * What this account's requests used and cost (/api/ai/usage, the history the
+ * app's Usage tab draws): the period's totals, what each model and key came
+ * to, then each request, newest first. Counts and costs only; nothing of what
+ * was asked or answered is kept.
+ */
+export async function aiUsage(k: Kit, a: { period?: unknown; model?: unknown; key?: unknown; next?: unknown }) {
+  const period = ['24h', '7d', '30d'].includes(String(a.period)) ? String(a.period) : '7d';
+  const qs = new URLSearchParams({ period });
+  const model = String(a.model ?? '').trim();
+  const key = String(a.key ?? '').trim();
+  const next = String(a.next ?? '').trim();
+  if (model) qs.set('model', model);
+  if (key) qs.set('key', key === 'ai_ask' ? 'chat' : key);
+  if (next) qs.set('before', next);
+  const v = await k.c.call<UsageView>(`/api/ai/usage?${qs}`).catch((e) => {
+    throw aiExplain(k, e);
+  });
+  return {
+    period: v.period,
+    totals: {
+      requests: v.totals.requests,
+      tokensIn: v.totals.in,
+      tokensOut: v.totals.out,
+      fromCache: v.totals.cached,
+      spentUsd: exact(v.totals.cost),
+      ...(v.totals.worth !== v.totals.cost ? { worthUsd: exact(v.totals.worth) } : {}),
+    },
+    byModel: v.models.map((m) => ({ model: m.id, private: m.private, usd: exact(m.worth) })),
+    bySource: v.sources.map((s) => ({
+      source: sourceName(s.id),
+      ...(s.id === 'chat' ? {} : { name: s.name, ...(s.last4 ? { endsWith: s.last4 } : {}), ...(s.revoked ? { revoked: true } : {}) }),
+      usd: exact(s.worth),
+    })),
+    requests: v.rows.map((r) => ({
+      at: iso(r.at),
+      model: r.model,
+      source: sourceName(r.source),
+      tokensIn: r.in,
+      tokensOut: r.out,
+      ...(r.cached ? { fromCache: r.cached } : {}),
+      costUsd: exact(r.cost),
+      ...(r.free ? { free: true } : {}),
+      ...(r.worth !== r.cost ? { worthUsd: exact(r.worth) } : {}),
+      ...(r.ms ? { seconds: Math.round(r.ms / 100) / 10 } : {}),
+      ...(r.flag === 'hung' ? { note: 'The connection closed before the answer ended.' } : r.flag === 'uncounted' ? { note: 'No count came back, so the most it could cost was charged.' } : {}),
+    })),
+    ...(v.next ? { next: v.next, more: 'Pass next back to read older requests.' } : {}),
+    note: 'Counts and costs only: what was asked or answered is never kept. Kept for 90 days. Narrow by model, or by source: a key id from ai, or ai_ask.',
+  };
+}
+
 /* ------------------------------------------------------------- credit */
 
 export type CreditPayer = { purse: 'vault'; row: Balance } | { purse: 'gram' } | { purse: 'cocoon'; master: string };

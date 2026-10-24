@@ -14,7 +14,7 @@ import { createKeystore, DEFAULT_SERVER, hasKeystore, loadKeystore, ownerGramWal
 import { KIT_VERSION } from './client';
 import { pinOwner, sealingOff } from './seal';
 import { perpsCancel, perpsClose, perpsDeposit, perpsMarkets, perpsOrder, perpsStatus, perpsWithdraw } from './perps';
-import { aiAddCredit, aiAsk, aiModelList, aiNewKey, aiRevokeKey, aiSummary } from './ai';
+import { aiAddCredit, aiAsk, aiModelList, aiNewKey, aiRevokeKey, aiSummary, aiUsage } from './ai';
 
 type Schema = {
   type: 'object';
@@ -814,6 +814,23 @@ export function buildTools(): Tool[] {
       args: ['id'],
       async run(a) {
         return aiRevokeKey(kit(), a);
+      },
+    },
+    {
+      name: 'ai_usage',
+      title: 'Private AI usage',
+      description:
+        "What your Private AI requests used and cost, newest first: each one's model, where it came from (ai_ask or one of your API keys), tokens in and out, what the cache read, its cost and when, with the period's totals and what each model and key came to. Counts and costs only; what was asked is never kept.",
+      input: obj({
+        period: S('24h, 7d or 30d. Optional; 7d.'),
+        model: S('Only this model id. Optional.'),
+        key: S('Only this source: a key id from ai, or ai_ask. Optional.'),
+        next: S('The next from an earlier answer, to read older requests. Optional.'),
+      }),
+      args: ['period'],
+      readOnly: true,
+      async run(a) {
+        return aiUsage(kit(), a);
       },
     },
     {

@@ -25,7 +25,9 @@
  *    (src/lib/secretGuard.ts, one module for both).
  *  - what is kept: nothing of the conversation. No prompt or answer is logged
  *    or stored; only counts of messages and tokens (the account's ledger, and
- *    aiuse:<uid>:<day> for the owner's free use), to price what an answer costs.
+ *    aiuse:<uid>:<day> for the owner's free use), to price what an answer costs,
+ *    and each request's model, tokens, cost and time for the account's usage
+ *    history (/api/ai/usage; rows in worker/ailedger.ts).
  *  - what it costs: the tokens used, from the account's prepaid credit
  *    (worker/ailedger.ts), the same credit its API keys spend (worker/aiapi.ts).
  *    The owner's use is free and still counted. The app's chat with one model,
@@ -40,7 +42,7 @@
  */
 import { looksLikeSecret } from '../src/lib/secretGuard';
 import { AI_LIMITS, newestTurns, type AiTurn } from '../src/lib/aiLimits';
-import { MICRO, cleanPrice, ledgerOf, type AiKey, type AiLedgerNs, type AiUse, type Ledger } from './ailedger';
+import { MICRO, cleanPrice, ledgerOf, type AiDay, type AiKey, type AiLedgerNs, type AiRow, type AiUse, type Ledger } from './ailedger';
 import { API_PREFIX, inputBound, newKey } from './aiapi';
 import { aiModels, aiPrice, anyReady, chargeMicro, defaultModel, forgetPrice, noteUpstreamCredit, pickModel, publicModel, routeFor, type AiModel, type AiModelsEnv } from './aimodels';
 import { nearMargin, shapeFor } from './nearai';
@@ -168,7 +170,8 @@ export function systemFor(m: Pick<AiModel, 'net' | 'tier' | 'name' | 'maker'>): 
   return ['You are Private AI, the assistant inside GhosterDex, a self-custody wallet app.', where, ...RULES].join(' ');
 }
 
-export type AskResult = { reply: string; model: string; tokensIn: number; tokensOut: number; cached: number; cut: boolean } | AiRefusal;
+/** ms: how long the network took; counted: it said how many tokens both ways (else the bounds were charged) */
+export type AskResult = { reply: string; model: string; tokensIn: number; tokensOut: number; cached: number; cut: boolean; ms: number; counted: boolean } | AiRefusal;
 
 /** The longest answer the chat asks of a model: room to think for one that always thinks first. */
 export const answerCap = (m: Pick<AiModel, 'reasons' | 'think'>) => (m.reasons && !m.think ? AI_LIMITS.answerThinking : AI_LIMITS.answer);
@@ -235,13 +238,17 @@ export async function askModel(env: PrivateAiEnv, turns: AiTurn[], model: AiMode
   const got = Number(j?.usage?.completion_tokens);
   const cached = Number(j?.usage?.prompt_tokens_details?.cached_tokens);
   const said = utf8.encode(String(choice?.message?.content || '') + String(choice?.message?.reasoning_content || '')).length;
+  const sentOk = Number.isFinite(sent) && sent > 0;
+  const gotOk = Number.isFinite(got) && got > 0;
   return {
     reply: cut ? `${reply} …` : reply,
     model: model.id,
-    tokensIn: Number.isFinite(sent) && sent > 0 ? sent : inputBound([system, ...turns.map((t) => t.content)]),
-    tokensOut: Number.isFinite(got) && got > 0 ? got : model.tier === 'open' ? answerCap(model) : Math.min(answerCap(model), said),
+    tokensIn: sentOk ? sent : inputBound([system, ...turns.map((t) => t.content)]),
+    tokensOut: gotOk ? got : model.tier === 'open' ? answerCap(model) : Math.min(answerCap(model), said),
     cached: Number.isFinite(cached) && cached > 0 ? cached : 0,
     cut,
+    ms: Date.now() - t0,
+    counted: sentOk && gotOk,
   };
 }
 
@@ -380,6 +387,169 @@ export async function aiAccountView(ledger: Ledger): Promise<AiAccountView | nul
   };
 }
 
+/* ------------------------------------------------------------ the usage history */
+
+/** the periods the history is read by: a day by the hour, a week and a month by the UTC day */
+export const USAGE_PERIODS = ['24h', '7d', '30d'] as const;
+export type UsagePeriod = (typeof USAGE_PERIODS)[number];
+export type AiUsageQuery = { period?: string; before?: string; model?: string; key?: string; limit?: number };
+
+/** One request as the screen shows it: the model by name, where it came from, dollars. Never what was asked. */
+export type AiUsageRow = {
+  id: string;
+  at: number;
+  model: string;
+  name: string;
+  maker: string;
+  private: boolean;
+  /** 'chat', or the API key's id */
+  source: string;
+  in: number;
+  out: number;
+  cached: number;
+  /** charged */
+  cost: number;
+  /** what it was worth: the cost, unless it was free or ran past the balance */
+  worth: number;
+  free?: 'owner' | 'gift';
+  stream?: true;
+  ms?: number;
+  /** hung: the caller hung up before the end; uncounted: no count came back, so the most it could cost was charged */
+  flag?: 'hung' | 'uncounted';
+};
+export type AiUsageBucket = { at: number; requests: number; cost: number; worth: number; chat: number; api: number };
+export type AiUsageSource = { id: string; name: string; last4: string; revoked: boolean; worth: number };
+export type AiUsageView = {
+  period: UsagePeriod;
+  from: number;
+  totals: { requests: number; in: number; out: number; cached: number; cost: number; worth: number };
+  /** by the hour for 24h, by the UTC day for 7d and 30d */
+  series: AiUsageBucket[];
+  /** what each model came to over the period, largest first */
+  models: Array<{ id: string; name: string; maker: string; private: boolean; worth: number }>;
+  /** what the chat and each key came to over the period, largest first */
+  sources: AiUsageSource[];
+  /** every key the account has, to name a row's source and filter by it */
+  keys: AiUsageSource[];
+  rows: AiUsageRow[];
+  next: string | null;
+  /** the history's first day, or null while it is empty */
+  since: number | null;
+};
+
+const HOUR = 3_600_000;
+const DAY = 86_400_000;
+
+/**
+ * One account's usage history (its own at /api/ai/usage; an agent's for its owner, worker/agents.ts): the period's
+ * totals and buckets, what each model and source came to, and a page of its requests, newest first. The figures
+ * cover the whole account; `model` and `key` narrow only the page. Null when the ledger cannot answer.
+ */
+export async function aiUsageView(ledger: Ledger, models: AiModel[], q: AiUsageQuery, now: number): Promise<AiUsageView | null> {
+  const period: UsagePeriod = (USAGE_PERIODS as readonly string[]).includes(String(q.period)) ? (q.period as UsagePeriod) : '7d';
+  const nDays = period === '30d' ? 30 : 7;
+  const from = period === '24h' ? Math.floor((now - 23 * HOUR) / HOUR) * HOUR : Math.floor(now / DAY) * DAY - (nDays - 1) * DAY;
+  const r = await ledger({
+    op: 'usage',
+    from,
+    limit: Math.min(100, Math.max(1, Math.floor(Number(q.limit) || 50))),
+    ...(typeof q.before === 'string' && q.before ? { before: q.before.slice(0, 40) } : {}),
+    ...(q.model ? { model: String(q.model).slice(0, 120) } : {}),
+    ...(q.key ? { key: String(q.key).slice(0, 40) } : {}),
+    ...(period === '24h' ? { span: now - from } : {}),
+  });
+  if (!r.ok) return null;
+  const byId = new Map(models.map((m) => [m.id, m]));
+  const modelOf = (id: string) => {
+    const m = byId.get(id);
+    /* a model the catalogue no longer lists keeps its id's own name, and is never called private on a guess */
+    return m ? { id, name: m.name, maker: m.maker, private: m.tier !== 'open' } : { id, name: id.split('/').pop() || id, maker: id.includes('/') ? id.split('/')[0] : '', private: false };
+  };
+  const keys: AiUsageSource[] = ((r.keys || []) as Array<{ id: string; name: string; last4: string; revoked: number | null }>).map((k) => ({ id: k.id, name: k.name, last4: k.last4, revoked: Boolean(k.revoked), worth: 0 }));
+  const sourceOf = (id: string, worth: number): AiUsageSource => {
+    if (id === 'chat') return { id, name: 'Chat', last4: '', revoked: false, worth };
+    const k = keys.find((x) => x.id === id);
+    return { id, name: k?.name || 'API key', last4: k?.last4 || '', revoked: k ? k.revoked : true, worth };
+  };
+
+  /* micro-dollars while adding up, dollars in what goes out */
+  const t = { requests: 0, in: 0, out: 0, cached: 0, cost: 0, worth: 0 };
+  const byModel = new Map<string, number>();
+  const bySource = new Map<string, number>();
+  const add = (m: Map<string, number>, k: string, v: number) => m.set(k, (m.get(k) || 0) + v);
+  let buckets: AiUsageBucket[];
+  if (period === '24h') {
+    buckets = Array.from({ length: 24 }, (_, i) => ({ at: from + i * HOUR, requests: 0, cost: 0, worth: 0, chat: 0, api: 0 }));
+    for (const x of (r.recent || []) as AiRow[]) {
+      const b = buckets[Math.floor((x.t - from) / HOUR)];
+      if (!b) continue;
+      const w = x.w ?? x.$;
+      b.requests += 1;
+      b.cost += x.$;
+      b.worth += w;
+      if (x.k === 'chat') b.chat += w;
+      else b.api += w;
+      t.in += x.i;
+      t.out += x.o;
+      t.cached += x.c || 0;
+      add(byModel, x.m, w);
+      add(bySource, x.k, w);
+    }
+  } else {
+    const days = (r.days || {}) as Record<string, AiDay>;
+    buckets = Array.from({ length: nDays }, (_, i) => {
+      const at = from + i * DAY;
+      const d = days[new Date(at).toISOString().slice(0, 10)];
+      if (!d) return { at, requests: 0, cost: 0, worth: 0, chat: 0, api: 0 };
+      t.in += d.i;
+      t.out += d.o;
+      t.cached += d.c;
+      for (const [k, v] of Object.entries(d.m)) add(byModel, k, v);
+      for (const [k, v] of Object.entries(d.k)) add(bySource, k, v);
+      const chat = d.k.chat || 0;
+      return { at, requests: d.n, cost: d.$, worth: d.w, chat, api: Math.max(0, d.w - chat) };
+    });
+  }
+  for (const b of buckets) {
+    t.requests += b.requests;
+    t.cost += b.cost;
+    t.worth += b.worth;
+  }
+  const first = Object.keys((r.days || {}) as Record<string, AiDay>).sort()[0];
+  return {
+    period,
+    from,
+    totals: { requests: t.requests, in: t.in, out: t.out, cached: t.cached, cost: usd(t.cost), worth: usd(t.worth) },
+    series: buckets.map((b) => ({ ...b, cost: usd(b.cost), worth: usd(b.worth), chat: usd(b.chat), api: usd(b.api) })),
+    models: [...byModel].sort((a, b) => b[1] - a[1]).map(([id, w]) => ({ ...modelOf(id), worth: usd(w) })),
+    sources: [...bySource].sort((a, b) => b[1] - a[1]).map(([id, w]) => sourceOf(id, usd(w))),
+    keys,
+    rows: ((r.rows || []) as Array<AiRow & { id: string }>).map((x) => {
+      const m = modelOf(x.m);
+      return {
+        id: x.id,
+        at: x.t,
+        model: x.m,
+        name: m.name,
+        maker: m.maker,
+        private: m.private,
+        source: x.k,
+        in: x.i,
+        out: x.o,
+        cached: x.c || 0,
+        cost: usd(x.$),
+        worth: usd(x.w ?? x.$),
+        ...(x.f === 1 ? { free: 'owner' as const } : x.f === 2 ? { free: 'gift' as const } : {}),
+        ...(x.s ? { stream: true as const } : {}),
+        ...(x.ms ? { ms: x.ms } : {}),
+        ...(x.x === 'h' ? { flag: 'hung' as const } : x.x === 'u' ? { flag: 'uncounted' as const } : {}),
+      };
+    }),
+    next: typeof r.next === 'string' ? r.next : null,
+    since: first ? Date.parse(`${first}T00:00:00Z`) : null,
+  };
+}
+
 /** Stops a key at once: the ledger first, which every request asks, then the index, so it is not even looked up again. */
 export async function revokeAiKey(env: Pick<PrivateAiEnv, 'STATE'>, ledger: Ledger, id: string): Promise<'ok' | 'no_key' | 'billing'> {
   if (!/^k[0-9a-f]{12}$/.test(id)) return 'no_key';
@@ -412,11 +582,13 @@ export interface PrivateAiCtx {
   isAgent?: (uid: string) => Promise<boolean>;
 }
 
-const ROUTES = new Set(['/api/ai/chat', '/api/ai/account', '/api/ai/keys', '/api/ai/keys/revoke', '/api/ai/price', '/api/ai/grant']);
+const ROUTES = new Set(['/api/ai/chat', '/api/ai/account', '/api/ai/usage', '/api/ai/keys', '/api/ai/keys/revoke', '/api/ai/price', '/api/ai/grant']);
+const GETS = new Set(['/api/ai/account', '/api/ai/usage']);
 
 /**
  *   POST /api/ai/chat          { messages } -> { reply, model, cut, balance }
  *   GET  /api/ai/account       the credit, the price, the keys and what each spent
+ *   GET  /api/ai/usage         ?period=24h|7d|30d&model&key&before: the usage history (aiUsageView)
  *   POST /api/ai/keys          { name } -> the new key, shown this once
  *   POST /api/ai/keys/revoke   { id }
  *   POST /api/ai/price         the owner's price per million tokens
@@ -426,7 +598,7 @@ const ROUTES = new Set(['/api/ai/chat', '/api/ai/account', '/api/ai/keys', '/api
 export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | null> {
   const { env, uid, path } = ctx;
   if (!ROUTES.has(path)) return null;
-  const want = path === '/api/ai/account' ? 'GET' : 'POST';
+  const want = GETS.has(path) ? 'GET' : 'POST';
   if (ctx.request.method !== want || !privateAiOn(env, ctx.isOwner)) return json({ error: 'Not found.' }, 404);
   if (!ctx.verified) return refuse(refusal('signin'));
   const ledgerFor = ctx.ledgerFor || ((u: string) => ledgerOf(env.AI_DO, u));
@@ -458,6 +630,19 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
       /* the free chat's model and what this account has left of it today, for its Free label (null: none for it) */
       freeChat: await freeChatView(ctx, new Date(now).toISOString().slice(0, 10)),
     });
+  }
+
+  if (path === '/api/ai/usage') {
+    if (!ledger) return refuse(refusal('billing'));
+    if (await ctx.overLimit(`rl:aiusage:${uid}`, 60)) return refuse(refusal('busy'));
+    const q = new URL(ctx.request.url).searchParams;
+    const view = await aiUsageView(
+      ledger,
+      await aiModels(env, ctx.fetcher),
+      { period: q.get('period') || '', before: q.get('before') || '', model: q.get('model') || '', key: q.get('key') || '', limit: Number(q.get('limit')) || 0 },
+      now,
+    );
+    return view ? json(view) : refuse(refusal('billing'));
   }
 
   if (path === '/api/ai/keys') {
@@ -528,7 +713,9 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
   const used = free ? ((await env.STATE.get(useKey, 'json').catch(() => null)) as DayUse | null) || { n: 0, in: 0, out: 0 } : null;
   if (used && used.n >= AI_LIMITS.perDay) return refuse(refusal('daily'));
   const bound = chargeMicro(model, inputBound([systemFor(model), ...clean.turns.map((t) => t.content)]), answerCap(model));
-  /* the free chat (freeChatHold): the house holds it, the person's ledger is not touched */
+  /* what an answer's row in the usage history says beyond its charge */
+  const facts = (got: Extract<AskResult, { reply: string }>) => ({ model: model.id, cached: got.cached, ms: got.ms, ...(got.counted ? {} : { note: 'u' as const }) });
+  /* the free chat (freeChatHold): the house holds and pays it; the person's credit is not touched */
   const gift = free ? null : await freeChatHold(ctx, ledgerFor, model, bound, day);
   if (gift) {
     const got = await askModel(env, clean.turns, model, ctx.fetcher);
@@ -537,7 +724,10 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
       if (got.upstream === 402) await noteUpstreamCredit(env, model, ctx.alert);
       return refuse(got);
     }
-    await gift.settle(chargeMicro(model, got.tokensIn, got.tokensOut, got.cached), got.tokensIn, got.tokensOut);
+    const micro = chargeMicro(model, got.tokensIn, got.tokensOut, got.cached);
+    await gift.settle(micro, got.tokensIn, got.tokensOut);
+    /* the asker's own history shows it, worth what it cost and nothing charged */
+    await ledger({ op: 'log', key: 'chat', micro, tokensIn: got.tokensIn, tokensOut: got.tokensOut, ...facts(got) });
     return json({ reply: got.reply, model: got.model, cut: got.cut, free: true });
   }
   const hold = await ledger({ op: 'hold', micro: bound, key: 'chat', free });
@@ -550,7 +740,7 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
     if (got.upstream === 402) await noteUpstreamCredit(env, model, ctx.alert);
     return refuse(got);
   }
-  const settled = await ledger({ op: 'settle', hold: holdId, micro: chargeMicro(model, got.tokensIn, got.tokensOut, got.cached), key: 'chat', tokensIn: got.tokensIn, tokensOut: got.tokensOut, free });
+  const settled = await ledger({ op: 'settle', hold: holdId, micro: chargeMicro(model, got.tokensIn, got.tokensOut, got.cached), key: 'chat', tokensIn: got.tokensIn, tokensOut: got.tokensOut, free, ...facts(got) });
   if (used) await env.STATE.put(useKey, JSON.stringify({ n: used.n + 1, in: used.in + got.tokensIn, out: used.out + got.tokensOut }), { expirationTtl: 45 * 86400 }).catch(() => {});
   return json({ reply: got.reply, model: got.model, cut: got.cut, ...(settled.ok && !free ? { balance: usd(settled.bal) } : {}) });
 }

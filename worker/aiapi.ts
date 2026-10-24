@@ -9,6 +9,7 @@
  *   base     https://ghosterdex.com/api/ai/v1
  *   GET      /models
  *   POST     /chat/completions   (stream or not; tools on the models that take them)
+ *   GET      /usage              this key's own requests, newest first (?limit, ?model, ?after=<next>)
  *   auth     Authorization: Bearer gdxai_...
  *
  * An agent can think with it (owner, 2026-10-22, over a Hermes agent that could not): tools, the model's calls
@@ -21,13 +22,14 @@
  * key still works, so a revoked key stops at once. Every request holds the
  * most it can cost before it is sent (each token is at least one byte of what
  * was sent, and the answer is capped), and settles to the tokens the gateway
- * counted. Nothing of a request or an answer is logged or stored.
+ * counted. Nothing of a request or an answer is logged or stored: its row in
+ * the usage history holds the model, the counts, the cost and the time only.
  *
  * Answered above index.ts's identity work: a key is its own identity, so
  * there is no Telegram or wallet session to resolve, and its limits are its
  * own (per key, and per address for keys that do not exist).
  */
-import { ledgerOf, type AiLedgerNs, type Ledger } from './ailedger';
+import { MICRO, ledgerOf, type AiLedgerNs, type AiRow, type Ledger } from './ailedger';
 import { aiModels, chargeMicro, defaultModel, noteUpstreamCredit, pickModel, routeFor, type AiModelsEnv } from './aimodels';
 import { shapeFor } from './nearai';
 
@@ -457,6 +459,39 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
   if (env.PRIVATE_AI === 'owner' && !idx.owner) return oaiError(403, 'Private AI is not open to this account yet.', 'not_available', 'permission_error');
   if (await ctx.overLimit(`rl:aikey:${idx.id}`, API_LIMITS.perKey)) return oaiError(429, 'Too many requests for this key. Slow down.', 'rate_limit_exceeded', 'rate_limit_error');
 
+  if (sub === '/usage' && request.method === 'GET') {
+    /* This key's own requests, newest first: never another key's, nor the app's chat. ?limit (1 to 100), ?model,
+       and ?after=<next> to read on. Counts, cost and time only; nothing of what was asked or answered is kept. */
+    const ledger = (ctx.ledgerFor || ((uid: string) => ledgerOf(env.AI_DO, uid)))(idx.uid);
+    if (!ledger) return oaiError(503, 'Billing is not available right now.', 'unavailable', 'server_error');
+    const q = new URL(request.url).searchParams;
+    const r = await ledger({
+      op: 'usage',
+      key: idx.id,
+      limit: Math.min(100, Math.max(1, Math.floor(Number(q.get('limit')) || 50))),
+      ...(q.get('after') ? { before: String(q.get('after')).slice(0, 40) } : {}),
+      ...(q.get('model') ? { model: String(q.get('model')).slice(0, 120) } : {}),
+    });
+    if (!r.ok) return oaiError(503, 'Billing is not available right now.', 'unavailable', 'server_error');
+    const data = ((r.rows || []) as Array<AiRow & { id: string }>).map((x) => ({
+      id: x.id,
+      object: 'usage.request',
+      created: Math.floor(x.t / 1000),
+      model: x.m,
+      usage: { prompt_tokens: x.i, completion_tokens: x.o, total_tokens: x.i + x.o, prompt_tokens_details: { cached_tokens: x.c || 0 } },
+      cost_usd: x.$ / MICRO,
+      /* a free key's request, or one past the credit: what it was worth beside what was charged */
+      ...(x.w !== undefined ? { worth_usd: x.w / MICRO } : {}),
+      ...(x.f ? { free: true } : {}),
+      stream: x.s === 1,
+      ...(x.ms ? { latency_ms: x.ms } : {}),
+      status: x.x === 'h' ? 'client_disconnected' : x.x === 'u' ? 'uncounted' : 'completed',
+    }));
+    return new Response(JSON.stringify({ object: 'list', data, has_more: typeof r.next === 'string', next: typeof r.next === 'string' ? r.next : null }), {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS },
+    });
+  }
+
   const models = await aiModels(env, ctx.fetcher);
   if (sub === '/models' && request.method === 'GET') {
     /* every model that can answer now; private says whether it runs in secure hardware, tools whether it takes
@@ -476,7 +511,7 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS },
     });
   }
-  if (sub !== '/chat/completions' || request.method !== 'POST') return oaiError(404, 'Not found. The API offers GET /models and POST /chat/completions.', 'not_found');
+  if (sub !== '/chat/completions' || request.method !== 'POST') return oaiError(404, 'Not found. The API offers GET /models, POST /chat/completions and GET /usage.', 'not_found');
   if (!models.some((m) => m.ready)) return oaiError(503, 'The model is not connected yet. Try again later.', 'not_connected', 'server_error');
 
   const text = await readBody(request, API_BODY_BYTES);
@@ -511,8 +546,22 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
     return oaiError(503, 'Billing is not available right now.', 'unavailable', 'server_error');
   }
   const holdId = String(hold.hold);
-  const settle = (tokensIn: number, tokensOut: number, cached = 0) =>
-    ledger({ op: 'settle', hold: holdId, micro: chargeMicro(model, tokensIn, tokensOut, cached), key: idx.id, tokensIn, tokensOut, free }).then(() => undefined);
+  /* note: h the caller hung up before the end, u no count came back (the row in the usage history says which) */
+  const settle = (tokensIn: number, tokensOut: number, cached = 0, note?: 'h' | 'u') =>
+    ledger({
+      op: 'settle',
+      hold: holdId,
+      micro: chargeMicro(model, tokensIn, tokensOut, cached),
+      key: idx.id,
+      tokensIn,
+      tokensOut,
+      free,
+      model: model.id,
+      cached,
+      ms: Date.now() - t0,
+      ...(clean.stream ? { stream: true } : {}),
+      ...(note ? { note } : {}),
+    }).then(() => undefined);
   const release = () => ledger({ op: 'release', hold: holdId }).then(() => undefined);
 
   /* only the settings this model takes (worker/nearai.ts shapeFor) */
@@ -568,7 +617,7 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
         const tokensIn = u.tokensIn ?? inMax;
         const tokensOut = u.outCounted ? u.tokensOut : unseenOut(u.seenBytes);
         console.log('[aiapi] stream', u.complete ? 'ended' : 'hung up', Date.now() - t0, 'ms', u.tokensIn ?? `${inMax} uncounted`, '/', u.outCounted ? u.tokensOut : `${tokensOut} uncounted`, 'tokens');
-        await settle(tokensIn, tokensOut, u.cached);
+        await settle(tokensIn, tokensOut, u.cached, !u.complete ? 'h' : u.tokensIn == null || !u.outCounted ? 'u' : undefined);
       },
     });
     return new Response(body, { headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', ...CORS } });
@@ -588,7 +637,7 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
   const tokensIn = Number.isFinite(pin) && pin > 0 ? pin : inMax;
   const tokensOut = Number.isFinite(pout) && pout >= 0 ? pout : unseenOut(utf8.encode(answer).length);
   const cached = Number(j?.usage?.prompt_tokens_details?.cached_tokens);
-  await settle(tokensIn, tokensOut, Number.isFinite(cached) && cached > 0 ? cached : 0);
+  await settle(tokensIn, tokensOut, Number.isFinite(cached) && cached > 0 ? cached : 0, Number.isFinite(pin) && pin > 0 && Number.isFinite(pout) && pout >= 0 ? undefined : 'u');
   console.log('[aiapi] answered', Date.now() - t0, 'ms', tokensIn, '/', tokensOut, 'tokens');
   return new Response(JSON.stringify(j), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS } });
 }

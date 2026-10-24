@@ -27,6 +27,13 @@
  *
  * The rules are pure functions over one plain record (applyOp), so the check
  * script runs them without a Durable Object at all.
+ *
+ * Each settled request also leaves one row in the usage history (owner,
+ * 2026-10-24: "there should be logs or usage history like this for the api for
+ * the agents wallet and for the other"): the model, its tokens, what the cache
+ * read, what it cost and where it came from. The rows live beside the record,
+ * one storage key each in time order (u:<ms>:<rand>), written in the same
+ * critical section as the charge, and the record keeps a total per day.
  */
 
 export const MICRO = 1_000_000;
@@ -42,12 +49,30 @@ const KEEP_REVOKED = 20;
 /** top-up references remembered, newest first; an order older than these can no longer be re-granted anyway */
 const KEEP_REFS = 500;
 
+/** the usage history keeps the newest USE_KEEP rows, none older than USE_KEEP_DAYS, and the record a total per day */
+export const USE_KEEP = 5000;
+export const USE_KEEP_DAYS = 90;
+const KEEP_DAYS = 62;
+/** rows past USE_KEEP before they are cleared, so a busy account clears in batches rather than on every request */
+const USE_SLACK = 250;
+
 /** hash is the key's SHA-256, kept so a revocation can delete its index; the key itself is never stored */
 export type AiKey = { id: string; name: string; last4: string; created: number; revoked?: number; hash?: string };
 export type AiUse = { n: number; in: number; out: number; micro: number; last: number };
 /** fb: the most a free request held under a day's cap may cost, counted against the cap until it settles */
 export type AiHold = { micro: number; at: number; key: string; fb?: number };
 export type AiTopup = { at: number; micro: number; ref: string; note: string };
+
+/**
+ * One request in the usage history: micro-dollars and the network's own token counts.
+ *   t settled at; k 'chat' or the key's id; m the model; i, o tokens in and out; c of the tokens in, read from cache
+ *   $ charged; w what it was worth, where that differs ($ 0 when free, less where the balance ran short)
+ *   f free: 1 the owner's own use, 2 the free chat; s streamed; ms how long the answer took
+ *   x h: the caller hung up before the end; u: no count came back, so the most it could cost was charged
+ */
+export type AiRow = { t: number; k: string; m: string; i: number; o: number; c?: number; $: number; w?: number; f?: 1 | 2; s?: 1; ms?: number; x?: 'h' | 'u' };
+/** A UTC day's totals: requests, tokens, charged, worth, and worth per source (k) and per model (m). */
+export type AiDay = { n: number; i: number; o: number; c: number; $: number; w: number; k: Record<string, number>; m: Record<string, number> };
 
 export interface LedgerRecord {
   bal: number;
@@ -61,21 +86,33 @@ export interface LedgerRecord {
   shortfall: number;
   /** what the account's free API keys spent on one UTC day (the owner's, worker/aiapi.ts) */
   free?: { day: string; micro: number };
+  /** the usage history's totals per UTC day, the newest KEEP_DAYS */
+  days?: Record<string, AiDay>;
+  /** rows the usage history holds, so the object knows when to clear the oldest */
+  rows?: number;
 }
 
 export function emptyLedger(): LedgerRecord {
   return { bal: 0, holds: {}, keys: [], use: {}, topups: [], refs: [], shortfall: 0 };
 }
 
+/** what a request's row says beyond the charge: a settle without a model leaves no row (the house's free chat ledger) */
+export type RowFacts = { model?: string; cached?: number; stream?: boolean; ms?: number; note?: 'h' | 'u' };
+
 export type LedgerOp =
   | { op: 'state' }
   | { op: 'credit'; ref: string; micro: number; note?: string }
   | { op: 'hold'; micro: number; key: string; free?: boolean; id?: string; freeCap?: number }
-  | { op: 'settle'; hold: string; micro: number; key: string; tokensIn: number; tokensOut: number; free?: boolean }
+  | ({ op: 'settle'; hold: string; micro: number; key: string; tokensIn: number; tokensOut: number; free?: boolean } & RowFacts)
   | { op: 'release'; hold: string }
   | { op: 'addKey'; key: AiKey }
   | { op: 'revokeKey'; id: string }
-  | { op: 'expire' };
+  | { op: 'expire' }
+  /* a question the house paid for (the free chat): a row in the asker's history, worth micro, nothing charged */
+  | ({ op: 'log'; key: string; micro: number; tokensIn: number; tokensOut: number } & RowFacts)
+  /* the usage history, newest first: a page before `before`, since `from`, of one model or source; `span` also
+     asks for every row since now - span, for a day's figures (the Durable Object answers it, not applyOp) */
+  | { op: 'usage'; before?: string; from?: number; limit?: number; model?: string; key?: string; span?: number };
 
 export type LedgerReply = Record<string, unknown> & { ok: boolean };
 
@@ -99,6 +136,38 @@ export function freeUsed(l: LedgerRecord, now: number): number {
 function count(l: LedgerRecord, key: string, tokensIn: number, tokensOut: number, micro: number, now: number) {
   const u = l.use[key] || { n: 0, in: 0, out: 0, micro: 0, last: 0 };
   l.use[key] = { n: u.n + 1, in: u.in + whole(tokensIn), out: u.out + whole(tokensOut), micro: u.micro + whole(micro), last: now };
+}
+
+/** A model id as a row keeps it: printable, short. Anything else is no model, and no row. */
+const MODEL_RE = /^[\w.:/@+-]{1,120}$/;
+
+/** The row a request leaves, and its day's totals; null when the caller named no model (no row, as before). */
+function rowOf(l: LedgerRecord, key: string, f: RowFacts, tokensIn: number, tokensOut: number, charged: number, worth: number, free: 0 | 1 | 2, now: number): AiRow | null {
+  if (typeof f.model !== 'string' || !MODEL_RE.test(f.model)) return null;
+  const i = whole(tokensIn);
+  const cached = Math.min(whole(f.cached), i);
+  const row: AiRow = { t: now, k: String(key).slice(0, 40), m: f.model, i, o: whole(tokensOut), $: whole(charged) };
+  if (cached > 0) row.c = cached;
+  if (whole(worth) !== row.$) row.w = whole(worth);
+  if (free) row.f = free;
+  if (f.stream) row.s = 1;
+  if (whole(f.ms) > 0) row.ms = Math.min(whole(f.ms), 3_600_000);
+  if (f.note === 'h' || f.note === 'u') row.x = f.note;
+  const day = dayOf(now);
+  const days = (l.days ||= {});
+  const d = (days[day] ||= { n: 0, i: 0, o: 0, c: 0, $: 0, w: 0, k: {}, m: {} });
+  const w = row.w ?? row.$;
+  d.n += 1;
+  d.i += row.i;
+  d.o += row.o;
+  d.c += row.c || 0;
+  d.$ += row.$;
+  d.w += w;
+  d.k[row.k] = (d.k[row.k] || 0) + w;
+  d.m[row.m] = (d.m[row.m] || 0) + w;
+  for (const old of Object.keys(days).sort().slice(0, -KEEP_DAYS)) delete days[old];
+  l.rows = whole(l.rows) + 1;
+  return row;
 }
 
 /**
@@ -168,7 +237,14 @@ export function applyOp(l: LedgerRecord, o: LedgerOp, now: number): LedgerReply 
         l.shortfall += cost - charged;
       }
       count(l, o.key, o.tokensIn, o.tokensOut, o.free ? whole(o.micro) : charged, now);
-      return { ok: true, bal: l.bal, charged };
+      /* its row in the usage history: nothing charged when free, and worth what it cost either way */
+      const row = rowOf(l, o.key, o, o.tokensIn, o.tokensOut, o.free ? 0 : charged, o.micro, o.free ? 1 : 0, now);
+      return { ok: true, bal: l.bal, charged, ...(row ? { row } : {}) };
+    }
+
+    case 'log': {
+      const row = rowOf(l, o.key, o, o.tokensIn, o.tokensOut, 0, o.micro, 2, now);
+      return row ? { ok: true, row } : { ok: false, why: 'bad_row' };
     }
 
     case 'release': {
@@ -216,33 +292,118 @@ export function applyOp(l: LedgerRecord, o: LedgerOp, now: number): LedgerReply 
 
 /* ------------------------------------------------------------ the object */
 
-interface StorageLike {
+export interface StorageLike {
   get<T>(key: string): Promise<T | undefined>;
   put(key: string, value: unknown): Promise<void>;
+  delete(keys: string[]): Promise<number>;
+  list<T>(o: { prefix?: string; start?: string; end?: string; reverse?: boolean; limit?: number }): Promise<Map<string, T>>;
   setAlarm(at: number): Promise<void>;
   getAlarm(): Promise<number | null>;
 }
-interface StateLike {
+export interface StateLike {
   storage: StorageLike;
   blockConcurrencyWhile<T>(fn: () => Promise<T>): Promise<T>;
 }
 
+/* ------------------------------------------------------------ the usage history's rows */
+
+/** a row's storage key: its time first, so the keys list in time order, and six letters so two never collide */
+const pad = (t: number) => String(whole(t)).padStart(13, '0');
+export const ROW_KEY = /^u:\d{13}:[a-z0-9]{6}$/;
+const rowKey = (t: number) => `u:${pad(t)}:${Math.random().toString(36).slice(2, 8).padEnd(6, '0')}`;
+/** rows read for one page at most, however few a filter keeps: a page is never a walk through the whole history */
+export const SCAN_MAX = 2000;
+
+/** The oldest rows past what is kept: older than USE_KEEP_DAYS, then past USE_KEEP. */
+async function prune(s: StorageLike, l: LedgerRecord, now: number): Promise<void> {
+  let gone = 0;
+  const aged = `u:${pad(now - USE_KEEP_DAYS * 86_400_000)}`;
+  for (;;) {
+    const batch = await s.list<AiRow>({ prefix: 'u:', end: aged, limit: 128 });
+    if (!batch.size) break;
+    gone += await s.delete([...batch.keys()]);
+    if (batch.size < 128) break;
+  }
+  let over = whole(l.rows) - gone - USE_KEEP;
+  while (over > 0) {
+    const batch = await s.list<AiRow>({ prefix: 'u:', limit: Math.min(128, over) });
+    if (!batch.size) break;
+    gone += await s.delete([...batch.keys()]);
+    over -= batch.size;
+  }
+  l.rows = Math.max(0, whole(l.rows) - gone);
+}
+
+/**
+ * A page of the usage history, newest first: since `from`, before the row `before`, of one model or source. `next`
+ * continues it (null once nothing older is left). The day totals and the keys' names come with it, to label it,
+ * and with `span`, every row since now - span (a day's figures are drawn from rows, not from day totals).
+ */
+async function usageOf(s: StorageLike, l: LedgerRecord, o: Extract<LedgerOp, { op: 'usage' }>, now: number): Promise<LedgerReply> {
+  const limit = Math.min(200, Math.max(1, whole(o.limit) || 50));
+  const start = `u:${pad(whole(o.from))}`;
+  let end = typeof o.before === 'string' && ROW_KEY.test(o.before) ? o.before : 'u:~';
+  const keep = (r: AiRow) => (!o.model || r.m === o.model) && (!o.key || r.k === o.key);
+  const rows: Array<AiRow & { id: string }> = [];
+  let scanned = 0;
+  let next: string | null = null;
+  page: for (;;) {
+    const batch = await s.list<AiRow>({ prefix: 'u:', start, end, reverse: true, limit: 200 });
+    for (const [id, r] of batch) {
+      scanned += 1;
+      end = id;
+      if (keep(r)) rows.push({ ...r, id });
+      if (rows.length >= limit || scanned >= SCAN_MAX) {
+        next = id;
+        break page;
+      }
+    }
+    if (batch.size < 200) break;
+  }
+  const span = whole(o.span);
+  const recent = span > 0 ? [...(await s.list<AiRow>({ prefix: 'u:', start: `u:${pad(now - span)}`, limit: USE_KEEP + USE_SLACK })).values()] : null;
+  return {
+    ok: true,
+    rows,
+    next,
+    days: l.days || {},
+    keys: l.keys.map((k) => ({ id: k.id, name: k.name, last4: k.last4, revoked: k.revoked || null })),
+    ...(recent ? { recent } : {}),
+  };
+}
+
 export class AiLedger {
   private state: StateLike;
+  private clock: () => number;
 
-  constructor(state: StateLike) {
+  /** the runtime passes (state, env); a check passes its own clock as the third */
+  constructor(state: StateLike, _env?: unknown, clock: () => number = Date.now) {
     this.state = state;
+    this.clock = clock;
   }
 
-  private async run(o: LedgerOp, now = Date.now()): Promise<LedgerReply> {
+  private async run(o: LedgerOp, now = this.clock()): Promise<LedgerReply> {
     let reply: LedgerReply = { ok: false };
     /* read, decide and write as one: no other movement on this account is delivered in between */
     await this.state.blockConcurrencyWhile(async () => {
-      const l = (await this.state.storage.get<LedgerRecord>('l')) || emptyLedger();
+      const s = this.state.storage;
+      const l = (await s.get<LedgerRecord>('l')) || emptyLedger();
+      if (o.op === 'usage') {
+        reply = await usageOf(s, l, o, now);
+        return;
+      }
       reply = applyOp(l, o, now);
-      if (o.op !== 'state') await this.state.storage.put('l', l);
+      /* the request's row, written with its charge; the oldest go in batches once past what is kept */
+      const row = reply.row as AiRow | undefined;
+      if (row) {
+        delete reply.row;
+        await s.put(rowKey(row.t), row);
+        const n = whole(l.rows);
+        if (n > USE_KEEP + USE_SLACK || n % 500 === 0) await prune(s, l, now);
+      }
+      if (o.op !== 'state') await s.put('l', l);
       /* an outstanding hold always has an alarm to bring it back */
-      if (o.op === 'hold' && reply.ok && !(await this.state.storage.getAlarm())) await this.state.storage.setAlarm(now + HOLD_MS + 5_000);
+      if (o.op === 'hold' && reply.ok && !(await s.getAlarm())) await s.setAlarm(now + HOLD_MS + 5_000);
     });
     return reply;
   }
