@@ -62,6 +62,8 @@ const KNOWN: Record<string, { name: string; tag: string }> = {
   'z-ai/glm-5.3-flash': { name: 'GLM 5.3 Flash', tag: 'Fast' },
   'Qwen/Qwen3.8-27B': { name: 'Qwen 3.8 27B', tag: 'Balanced' },
   'Qwen/Qwen3.6-35B-A3B-FP8': { name: 'Qwen 3.6 35B', tag: 'Reasoning' },
+  /* served in NEAR AI's own hardware since late October (before, through a maker's network as deepseek/deepseek-v4.1-flash-1017) */
+  'deepseek-ai/DeepSeek-V4.1-Flash-1017': { name: 'DeepSeek V4.1 Flash', tag: 'Reasoning' },
   'Qwen/Qwen3-VL-30B-A3B-Instruct': { name: 'Qwen3 VL 30B', tag: 'Fast' },
   'deepseek/deepseek-v3.2': { name: 'DeepSeek V3.2', tag: 'Strong' },
   'qwen/qwen3.5-397b-a17b': { name: 'Qwen 3.5 397B', tag: 'Strong' },
@@ -76,6 +78,7 @@ const MAKERS: Record<string, string> = {
   google: 'Google',
   'x-ai': 'xAI',
   deepseek: 'DeepSeek',
+  'deepseek-ai': 'DeepSeek',
   qwen: 'Qwen',
   'z-ai': 'Z.ai',
   'zai-org': 'Z.ai',
@@ -89,6 +92,23 @@ export const NEAR_DEFAULT = 'z-ai/glm-5.3-flash';
 
 /** never a chat model, whatever the catalogue says of its modalities */
 const NOT_CHAT = /whisper|rerank|embedding|privacy-filter|moderation|jev-|flux/i;
+/** a model with its refusals taken out, by NEAR AI's own words for red teaming: never offered in a wallet's assistant
+    (owner, 2026-10-30, on Qwen 3.8 27B Abliterated and DeepSeek V4.1 Flash Abliterated) */
+const NO_REFUSALS = /abliterat|uncensored/i;
+
+/**
+ * Models NEAR AI lists with no sampling parameters at all, so none shows the reply cap Private AI bills by. Each was
+ * measured instead (owner, 2026-10-30: "do all three"): asked for three paragraphs
+ * under a 48-token cap, each stopped there (finish "length") and said what it used, whole and streamed; given room,
+ * each answered clean, the thinking ones in a field of their own. They are offered with max_tokens alone, and
+ * `reasons` gives a thinker its room to think. A list of their own, if NEAR AI ever adds one, is used instead.
+ */
+const MEASURED: Readonly<Record<string, { reasons: boolean }>> = {
+  'deepseek-ai/DeepSeek-V4.1-Flash-1017': { reasons: true },
+  'moonshotai/kimi-k3.1-pro': { reasons: true },
+  'google/gemini-3.8-flash': { reasons: true },
+  'anthropic/claude-opus-4-8': { reasons: false },
+};
 
 /** no chat model costs more than this per million tokens: a price past it is a broken entry, never a bill */
 export const MAX_PER_M = 1000;
@@ -131,11 +151,14 @@ export function parseCatalogue(raw: unknown, margin = 0): AiModel[] {
     const id = typeof m?.modelId === 'string' ? m.modelId : '';
     const md = m?.metadata || {};
     if (!id || NOT_CHAT.test(id)) continue;
+    if (NO_REFUSALS.test(id) || NO_REFUSALS.test(String(md.modelDisplayName || ''))) continue;
     const ins: unknown[] = md?.architecture?.inputModalities || [];
     const outs: unknown[] = md?.architecture?.outputModalities || [];
     if (!ins.includes('text') || outs.length !== 1 || outs[0] !== 'text') continue;
     if (!(Number(md.contextLength) >= 8192)) continue;
-    const params: string[] = Array.isArray(md.supportedSamplingParameters) ? md.supportedSamplingParameters.filter((x: unknown) => typeof x === 'string') : [];
+    const listed: string[] = Array.isArray(md.supportedSamplingParameters) ? md.supportedSamplingParameters.filter((x: unknown) => typeof x === 'string') : [];
+    const measured = listed.length ? undefined : MEASURED[id];
+    const params: string[] = measured ? ['max_tokens'] : listed;
     if (!params.includes('max_tokens')) continue;
     const cin = perM(m.inputCostPerToken);
     const cout = perM(m.outputCostPerToken);
@@ -160,7 +183,7 @@ export function parseCatalogue(raw: unknown, margin = 0): AiModel[] {
       ready: true,
       ...(known ? { tag: known.tag } : {}),
       params,
-      reasons: features.includes('reasoning') || /^moonshotai\/kimi-k2/i.test(id),
+      reasons: features.includes('reasoning') || /^moonshotai\/kimi-k2/i.test(id) || Boolean(measured?.reasons),
       think: thinkOf(id, tier),
       tools: features.includes('tools'),
       context: Math.floor(Number(md.contextLength)),
