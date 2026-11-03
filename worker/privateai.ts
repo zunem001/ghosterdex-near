@@ -468,6 +468,8 @@ export async function aiUsageView(ledger: Ledger, models: AiModel[], q: AiUsageQ
   const keys: AiUsageSource[] = ((r.keys || []) as Array<{ id: string; name: string; last4: string; revoked: number | null }>).map((k) => ({ id: k.id, name: k.name, last4: k.last4, revoked: Boolean(k.revoked), worth: 0 }));
   const sourceOf = (id: string, worth: number): AiUsageSource => {
     if (id === 'chat') return { id, name: 'Chat', last4: '', revoked: false, worth };
+    /* the app's AI scan of a site or a transaction (worker/dapps.ts) */
+    if (id === 'scan') return { id, name: 'AI scan', last4: '', revoked: false, worth };
     const k = keys.find((x) => x.id === id);
     return { id, name: k?.name || 'API key', last4: k?.last4 || '', revoked: k ? k.revoked : true, worth };
   };

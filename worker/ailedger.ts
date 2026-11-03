@@ -120,7 +120,7 @@ const whole = (n: unknown) => (Number.isFinite(Number(n)) ? Math.max(0, Math.flo
 
 /** A key may be used: it exists here and was never revoked. 'chat' is the app's own chat, always allowed. */
 function keyLive(l: LedgerRecord, key: string): boolean {
-  if (key === 'chat') return true;
+  if (key === 'chat' || key === 'scan') return true;
   const k = l.keys.find((x) => x.id === key);
   return Boolean(k && !k.revoked);
 }
