@@ -52,6 +52,7 @@ const pretty = (id: string) => (id.split('/').pop() || id).replace(/^Qwen3-(\d+)
 /**
  * Every model, NEAR AI's then Cocoon's, each with the price a person pays and whether it can answer now.
  * NEAR AI's catalogue is not even read until its key is set: before that its models could not answer.
+ * Never one whose refusals were taken out: those are noRefusalModels below, for a person's API key alone.
  */
 export async function aiModels(env: AiModelsEnv, fetcher: typeof fetch = fetch): Promise<AiModel[]> {
   const [near, price] = await Promise.all([nearReady(env) ? nearModels(env, fetcher) : Promise.resolve([] as AiModel[]), aiPrice(env)]);
@@ -74,7 +75,12 @@ export async function aiModels(env: AiModelsEnv, fetcher: typeof fetch = fetch):
     context: 32_768,
   };
   /* one id names one model: should NEAR AI ever list Cocoon's, Cocoon's own entry is the one kept */
-  return [...near.filter((m) => m.id !== id), cocoon];
+  return [...near.filter((m) => m.id !== id && !m.noRefusals), cocoon];
+}
+
+/** The models open on a person's API key alone, whose refusals were taken out (worker/nearai.ts NO_REFUSALS). */
+export async function noRefusalModels(env: AiModelsEnv, fetcher: typeof fetch = fetch): Promise<AiModel[]> {
+  return nearReady(env) ? (await nearModels(env, fetcher)).filter((m) => m.noRefusals) : [];
 }
 
 /** The model a request names, if it is offered and can answer now; null otherwise (never a guess). */
@@ -146,5 +152,6 @@ export function publicModel(m: AiModel) {
     /* what an agent picks a model by: tools (function calling) and how much it reads */
     tools: m.tools === true,
     ...(m.context ? { context: m.context } : {}),
+    ...(m.noRefusals ? { noRefusals: true } : {}),
   };
 }

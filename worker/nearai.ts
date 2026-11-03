@@ -55,6 +55,8 @@ export interface AiModel {
   tools?: boolean;
   /** the most tokens it reads in one request, as its network says; absent when not known */
   context?: number;
+  /** its refusals were taken out: on API keys alone, under a warning (NO_REFUSALS below) */
+  noRefusals?: boolean;
 }
 
 /** The private models by name, in the order the menu lists them, with what each is good at. Others keep NEAR AI's own name. */
@@ -69,6 +71,8 @@ const KNOWN: Record<string, { name: string; tag: string }> = {
   'qwen/qwen3.5-397b-a17b': { name: 'Qwen 3.5 397B', tag: 'Strong' },
   'moonshotai/kimi-k2.6': { name: 'Kimi K2.6', tag: 'Strong' },
   'moonshotai/kimi-k3': { name: 'Kimi K3', tag: 'Strongest' },
+  'deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated': { name: 'DeepSeek V4.1 Flash Abliterated', tag: 'Reasoning' },
+  'Qwen/Qwen3.8-27B-abliterated': { name: 'Qwen 3.8 27B Abliterated', tag: 'Balanced' },
 };
 const ORDER = Object.keys(KNOWN);
 
@@ -92,19 +96,27 @@ export const NEAR_DEFAULT = 'z-ai/glm-5.3-flash';
 
 /** never a chat model, whatever the catalogue says of its modalities */
 const NOT_CHAT = /whisper|rerank|embedding|privacy-filter|moderation|jev-|flux/i;
-/** a model with its refusals taken out, by NEAR AI's own words for red teaming: never offered in a wallet's assistant
-    (owner, 2026-10-30, on Qwen 3.8 27B Abliterated and DeepSeek V4.1 Flash Abliterated) */
-const NO_REFUSALS = /abliterat|uncensored/i;
+/**
+ * A model with its refusals taken out, in NEAR AI's words for red teaming, security research and evaluations.
+ * Hidden unless named here (owner, 2026-10-30), so a new one waits for the owner's word. These two are open on API
+ * keys alone (owner, 2026-11-03: "please do not keep it hidden, make it open", "make them open", after being told
+ * that way was API keys, under a warning, out of the free chat and agents): aiModels (worker/aimodels.ts) leaves
+ * them out, so the chat and an agent cannot reach one, and only a person's key may name one (worker/aiapi.ts).
+ */
+const NO_REFUSALS = /abliterat|ablated|uncensored|decensored|unfiltered|unrestricted|heretic|jailbr[eo]|no-?refusal/i;
+const OPEN_NO_REFUSALS: ReadonlySet<string> = new Set(['deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated', 'Qwen/Qwen3.8-27B-abliterated']);
 
 /**
  * Models NEAR AI lists with no sampling parameters at all, so none shows the reply cap Private AI bills by. Each was
- * measured instead (owner, 2026-10-30: "do all three"): asked for three paragraphs
+ * measured instead (owner, 2026-10-30: "do all three"; the abliterated DeepSeek on
+ * 2026-11-03, probe-abl): asked for three paragraphs
  * under a 48-token cap, each stopped there (finish "length") and said what it used, whole and streamed; given room,
  * each answered clean, the thinking ones in a field of their own. They are offered with max_tokens alone, and
  * `reasons` gives a thinker its room to think. A list of their own, if NEAR AI ever adds one, is used instead.
  */
 const MEASURED: Readonly<Record<string, { reasons: boolean }>> = {
   'deepseek-ai/DeepSeek-V4.1-Flash-1017': { reasons: true },
+  'deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated': { reasons: true },
   'moonshotai/kimi-k3.1-pro': { reasons: true },
   'google/gemini-3.8-flash': { reasons: true },
   'anthropic/claude-opus-4-8': { reasons: false },
@@ -151,7 +163,8 @@ export function parseCatalogue(raw: unknown, margin = 0): AiModel[] {
     const id = typeof m?.modelId === 'string' ? m.modelId : '';
     const md = m?.metadata || {};
     if (!id || NOT_CHAT.test(id)) continue;
-    if (NO_REFUSALS.test(id) || NO_REFUSALS.test(String(md.modelDisplayName || ''))) continue;
+    const noRefusals = NO_REFUSALS.test(id) || NO_REFUSALS.test(String(md.modelDisplayName || ''));
+    if (noRefusals && !OPEN_NO_REFUSALS.has(id)) continue;
     const ins: unknown[] = md?.architecture?.inputModalities || [];
     const outs: unknown[] = md?.architecture?.outputModalities || [];
     if (!ins.includes('text') || outs.length !== 1 || outs[0] !== 'text') continue;
@@ -187,6 +200,7 @@ export function parseCatalogue(raw: unknown, margin = 0): AiModel[] {
       think: thinkOf(id, tier),
       tools: features.includes('tools'),
       context: Math.floor(Number(md.contextLength)),
+      ...(noRefusals ? { noRefusals: true } : {}),
     });
   }
   /* the private ones first, in the menu's own order; then every other by maker and name */

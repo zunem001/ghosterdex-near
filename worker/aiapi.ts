@@ -30,7 +30,7 @@
  * own (per key, and per address for keys that do not exist).
  */
 import { MICRO, ledgerOf, type AiLedgerNs, type AiRow, type Ledger } from './ailedger';
-import { aiModels, chargeMicro, defaultModel, noteUpstreamCredit, pickModel, routeFor, type AiModelsEnv } from './aimodels';
+import { aiModels, chargeMicro, defaultModel, noRefusalModels, noteUpstreamCredit, pickModel, routeFor, type AiModelsEnv } from './aimodels';
 import { shapeFor } from './nearai';
 
 /* the price lives with the models now (worker/aimodels.ts); kept here for older importers */
@@ -434,6 +434,8 @@ export interface AiApiCtx {
   ledgerFor?: (uid: string) => Ledger | null;
   /** a message to the owner (index.ts ownerTelegram): a network out of the house's credit */
   alert?: (text: string) => Promise<unknown>;
+  /** a paired agent (agents.ts agentCard): its key never names a model whose refusals were taken out */
+  isAgent?: (uid: string) => Promise<boolean>;
 }
 
 /** Everything under /api/ai/v1, or null for any other path. */
@@ -493,10 +495,13 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
   }
 
   const models = await aiModels(env, ctx.fetcher);
+  /* those whose refusals were taken out, for this key: a person's, never an agent's, and one not known to be a
+     person's counts as an agent's. Asked only when wanted, so an ordinary request costs no extra read. */
+  const unrefusing = async () => (!ctx.isAgent || (await ctx.isAgent(idx.uid).catch(() => true)) ? [] : noRefusalModels(env, ctx.fetcher));
   if (sub === '/models' && request.method === 'GET') {
     /* every model that can answer now; private says whether it runs in secure hardware, tools whether it takes
        function calls, context_length how much it reads (the field agent frameworks size a conversation by) */
-    const data = models
+    const data = [...models, ...(await unrefusing())]
       .filter((m) => m.ready)
       .map((m) => ({
         id: m.id,
@@ -506,6 +511,7 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
         private: m.tier !== 'open',
         tools: m.tools === true,
         ...(m.context ? { context_length: m.context } : {}),
+        ...(m.noRefusals ? { no_refusals: true } : {}),
       }));
     return new Response(JSON.stringify({ object: 'list', data }), {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS },
@@ -523,7 +529,8 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
     return oaiError(400, 'The request body must be JSON.', 'invalid_json');
   }
   const asked = typeof (b as any)?.model === 'string' ? (b as any).model.trim() : '';
-  const model = asked && asked !== 'default' ? pickModel(models, asked) : defaultModel(models, env);
+  const named = asked && asked !== 'default';
+  const model = (named ? pickModel(models, asked) : defaultModel(models, env)) || (named ? pickModel(await unrefusing(), asked) : null);
   if (!model) return oaiError(404, `The model ${asked.slice(0, 80)} does not exist. GET /models lists the ones that do.`, 'model_not_found');
   const route = routeFor(env, model);
   if (!route) return oaiError(503, 'The model is not connected yet. Try again later.', 'not_connected', 'server_error');

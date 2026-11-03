@@ -44,7 +44,7 @@ import { looksLikeSecret } from '../src/lib/secretGuard';
 import { AI_LIMITS, newestTurns, type AiTurn } from '../src/lib/aiLimits';
 import { MICRO, cleanPrice, ledgerOf, type AiDay, type AiKey, type AiLedgerNs, type AiRow, type AiUse, type Ledger } from './ailedger';
 import { API_PREFIX, inputBound, newKey } from './aiapi';
-import { aiModels, aiPrice, anyReady, chargeMicro, defaultModel, forgetPrice, noteUpstreamCredit, pickModel, publicModel, routeFor, type AiModel, type AiModelsEnv } from './aimodels';
+import { aiModels, aiPrice, anyReady, chargeMicro, defaultModel, forgetPrice, noRefusalModels, noteUpstreamCredit, pickModel, publicModel, routeFor, type AiModel, type AiModelsEnv } from './aimodels';
 import { nearMargin, shapeFor } from './nearai';
 
 export { AI_LIMITS, type AiTurn };
@@ -611,6 +611,8 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
     const view = await aiAccountView(ledger);
     if (!view) return refuse(refusal('billing'));
     const models = await aiModels(env, ctx.fetcher);
+    /* apart from `models`, which every version of the chat's sheet reads: the API tab's sheet alone adds these */
+    const apiOnly = !ctx.isAgent || (await ctx.isAgent(uid).catch(() => true)) ? [] : await noRefusalModels(env, ctx.fetcher);
     return json({
       free: ctx.isOwner,
       balance: view.balance,
@@ -621,6 +623,7 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
       base: `https://${new URL(ctx.request.url).host}${API_PREFIX}`,
       model: defaultModel(models, env)?.id || AI_MODEL,
       models: models.map(publicModel),
+      ...(apiOnly.length ? { apiOnly: apiOnly.map(publicModel) } : {}),
       ...(ctx.isOwner ? { margin: await nearMargin(env) } : {}),
       ready: privateAiReady(env),
       keys: view.keys,
@@ -638,7 +641,8 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
     const q = new URL(ctx.request.url).searchParams;
     const view = await aiUsageView(
       ledger,
-      await aiModels(env, ctx.fetcher),
+      /* a key's requests may have named one open on keys alone, so the history can name it too */
+      [...(await aiModels(env, ctx.fetcher)), ...(await noRefusalModels(env, ctx.fetcher))],
       { period: q.get('period') || '', before: q.get('before') || '', model: q.get('model') || '', key: q.get('key') || '', limit: Number(q.get('limit')) || 0 },
       now,
     );
