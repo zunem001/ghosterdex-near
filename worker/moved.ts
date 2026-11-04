@@ -26,6 +26,17 @@ export function retireMoved<T extends { assetId: string; retired?: boolean }>(to
 }
 
 /**
+ * An id the catalogue lists ahead of its chain. Miden's five coins joined it between 2026-10-30 and 2026-11-04 as NEAR
+ * coins (nep141:miden-...omft.near, blockchain "near"), though no such account exists on NEAR: a deposit answers "tokenIn
+ * is not valid", every swap "No liquidity available", and near.com does not list them. Shown, they read as a second ETH,
+ * USDT and WBTC on NEAR, and as SOL and USDCx on NEAR, which a deposit then refuses. Once one carries a chain of its own
+ * this stops matching, and it takes the usual road for a new chain.
+ */
+export function aheadOfItsChain(t: { assetId: string; blockchain?: string }): boolean {
+  return t.blockchain === 'near' && t.assetId.startsWith('nep141:miden-');
+}
+
+/**
  * Why a route into a retired asset is refused, or null. A retired asset can be sold, switched, withdrawn or sent as
  * it is; nothing new goes into it: no deposit, and no route from another coin.
  */
