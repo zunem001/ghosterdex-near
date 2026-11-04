@@ -1,0 +1,385 @@
+{
+ "models": [
+  {
+   "modelId": "z-ai/glm-5.3-flash",
+   "inputCostPerToken": {
+    "amount": 80,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "outputCostPerToken": {
+    "amount": 500,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "costPerImage": {
+    "amount": 0,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "cacheReadCostPerToken": {
+    "amount": 12,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "metadata": {
+    "verifiable": true,
+    "contextLength": 1048576,
+    "modelDisplayName": "GLM 5.3 Flash",
+    "modelDescription": "GLM-5.3-Flash is a native multimodal mixture-of-experts model for coding, agentic workflows, reasoning, tool use, and visual understanding.",
+    "modelIcon": "https://avatars.githubusercontent.com/u/223098841?v=4",
+    "ownedBy": "nearai",
+    "aliases": [
+     "zai-org/GLM-5.3-Flash",
+     "GLM-5.3-Flash",
+     "glm-5.3-flash",
+     "zai-org/GLM-5.1-FP8",
+     "zai-org/GLM-5-FP8",
+     "glm-latest",
+     "zai-org/GLM-latest",
+     "GLM-5",
+     "zai-org/GLM-4.7",
+     "glm",
+     "GLM-5.1",
+     "zai-org/GLM-5.1",
+     "z-ai/glm-5.2",
+     "deepseek-ai/DeepSeek-V4-Flash"
+    ],
+    "providerType": "vllm",
+    "providerConfig": {
+     "long_context": {
+      "inference_url": "https://glm-5-3-flash-long.completions.near.ai",
+      "max_context_tokens": 1048576,
+      "base_max_context_tokens": 100000
+     }
+    },
+    "attestationSupported": true,
+    "architecture": {
+     "inputModalities": [
+      "text",
+      "image"
+     ],
+     "outputModalities": [
+      "text"
+     ]
+    },
+    "huggingFaceId": "zai-org/GLM-5.3-Flash",
+    "quantization": "fp8",
+    "maxOutputLength": 1048576,
+    "supportedSamplingParameters": [
+     "temperature",
+     "top_p",
+     "top_k",
+     "min_p",
+     "frequency_penalty",
+     "presence_penalty",
+     "repetition_penalty",
+     "max_tokens",
+     "stop",
+     "seed",
+     "logit_bias"
+    ],
+    "supportedFeatures": [
+     "tools",
+     "structured_outputs",
+     "reasoning",
+     "json_mode"
+    ],
+    "isReady": true,
+    "openrouterSlug": "z-ai/glm-5.3-flash"
+   }
+  },
+  {
+   "modelId": "deepseek/deepseek-v3.2",
+   "inputCostPerToken": {
+    "amount": 1100,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "outputCostPerToken": {
+    "amount": 1100,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "costPerImage": {
+    "amount": 0,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "cacheReadCostPerToken": {
+    "amount": 550,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "metadata": {
+    "verifiable": true,
+    "contextLength": 128000,
+    "modelDisplayName": "deepseek-v3.2",
+    "modelDescription": "Attested model served via Chutes TEE (verified end-to-end by NEAR AI).",
+    "modelIcon": "https://avatars.githubusercontent.com/u/148330874?v=4",
+    "ownedBy": "attested 3p",
+    "providerType": "chutes",
+    "attestationSupported": true,
+    "architecture": {
+     "inputModalities": [
+      "text"
+     ],
+     "outputModalities": [
+      "text"
+     ]
+    },
+    "supportedSamplingParameters": [
+     "temperature",
+     "top_p",
+     "frequency_penalty",
+     "presence_penalty",
+     "stop",
+     "seed",
+     "max_tokens"
+    ],
+    "supportedFeatures": [
+     "tools",
+     "json_mode"
+    ],
+    "isReady": false
+   }
+  },
+  {
+   "modelId": "deepseek/deepseek-v4.1-flash",
+   "inputCostPerToken": {
+    "amount": 300,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "outputCostPerToken": {
+    "amount": 1200,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "costPerImage": {
+    "amount": 0,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "cacheReadCostPerToken": {
+    "amount": 6,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "metadata": {
+    "verifiable": false,
+    "contextLength": 1048576,
+    "modelDisplayName": "DeepSeek V4.1 Flash",
+    "modelDescription": "DeepSeek reasoning and coding model with image understanding. Served through OpenRouter using ZDR inference endpoints.",
+    "modelIcon": "https://avatars.githubusercontent.com/u/148330874?v=4",
+    "ownedBy": "deepseek",
+    "aliases": [
+     "deepseek-v4.1-flash"
+    ],
+    "providerType": "external",
+    "providerConfig": {
+     "api_key": "***",
+     "backend": "openai_compatible",
+     "base_url": "https://openrouter.ai/api/v1",
+     "model_name": "deepseek/deepseek-v4.1-flash",
+     "extra_request_body": {
+      "provider": {
+       "zdr": true,
+       "only": [
+        "novita/fp8"
+       ],
+       "allow_fallbacks": false,
+       "data_collection": "deny"
+      }
+     },
+     "enforced_request_body": {
+      "provider": {
+       "zdr": true,
+       "only": [
+        "novita/fp8"
+       ],
+       "allow_fallbacks": false,
+       "data_collection": "deny"
+      }
+     }
+    },
+    "attestationSupported": false,
+    "architecture": {
+     "inputModalities": [
+      "text",
+      "image"
+     ],
+     "outputModalities": [
+      "text"
+     ]
+    },
+    "huggingFaceId": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "maxOutputLength": 393216,
+    "supportedSamplingParameters": [
+     "temperature",
+     "top_p",
+     "top_k",
+     "frequency_penalty",
+     "presence_penalty",
+     "repetition_penalty",
+     "stop",
+     "max_tokens"
+    ],
+    "supportedFeatures": [
+     "tools",
+     "json_mode",
+     "reasoning"
+    ],
+    "isReady": true
+   }
+  },
+  {
+   "modelId": "google/gemini-2.5-flash",
+   "inputCostPerToken": {
+    "amount": 300,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "outputCostPerToken": {
+    "amount": 2500,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "costPerImage": {
+    "amount": 0,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "metadata": {
+    "verifiable": false,
+    "contextLength": 1000000,
+    "modelDisplayName": "Gemini 2.5 Flash",
+    "modelDescription": "Google's fast hybrid reasoning model with 1M token context window. Optimized for speed and cost while maintaining strong performance across tasks.",
+    "modelIcon": "https://avatars.githubusercontent.com/u/1342004?v=4",
+    "ownedBy": "google",
+    "aliases": [
+     "gemini-2.5-flash"
+    ],
+    "providerType": "external",
+    "providerConfig": {
+     "backend": "gemini",
+     "base_url": "https://generativelanguage.googleapis.com/v1beta",
+     "model_name": "gemini-2.5-flash"
+    },
+    "attestationSupported": false,
+    "architecture": {
+     "inputModalities": [
+      "text",
+      "image"
+     ],
+     "outputModalities": [
+      "text"
+     ]
+    },
+    "maxOutputLength": 8192,
+    "supportedSamplingParameters": [
+     "temperature",
+     "top_p",
+     "top_k",
+     "max_tokens",
+     "stop"
+    ],
+    "supportedFeatures": [
+     "tools",
+     "structured_outputs",
+     "json_mode"
+    ],
+    "isReady": false
+   }
+  },
+  {
+   "modelId": "test/broken-price",
+   "inputCostPerToken": {
+    "amount": "not a number",
+    "scale": 9,
+    "currency": "USD"
+   },
+   "outputCostPerToken": {
+    "amount": "not a number",
+    "scale": 9,
+    "currency": "USD"
+   },
+   "costPerImage": {
+    "amount": 0,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "cacheReadCostPerToken": {
+    "amount": 12,
+    "scale": 9,
+    "currency": "USD"
+   },
+   "metadata": {
+    "verifiable": true,
+    "contextLength": 1048576,
+    "modelDisplayName": "GLM 5.3 Flash",
+    "modelDescription": "GLM-5.3-Flash is a native multimodal mixture-of-experts model for coding, agentic workflows, reasoning, tool use, and visual understanding.",
+    "modelIcon": "https://avatars.githubusercontent.com/u/223098841?v=4",
+    "ownedBy": "nearai",
+    "aliases": [
+     "zai-org/GLM-5.3-Flash",
+     "GLM-5.3-Flash",
+     "glm-5.3-flash",
+     "zai-org/GLM-5.1-FP8",
+     "zai-org/GLM-5-FP8",
+     "glm-latest",
+     "zai-org/GLM-latest",
+     "GLM-5",
+     "zai-org/GLM-4.7",
+     "glm",
+     "GLM-5.1",
+     "zai-org/GLM-5.1",
+     "z-ai/glm-5.2",
+     "deepseek-ai/DeepSeek-V4-Flash"
+    ],
+    "providerType": "vllm",
+    "providerConfig": {
+     "long_context": {
+      "inference_url": "https://glm-5-3-flash-long.completions.near.ai",
+      "max_context_tokens": 1048576,
+      "base_max_context_tokens": 100000
+     }
+    },
+    "attestationSupported": true,
+    "architecture": {
+     "inputModalities": [
+      "text",
+      "image"
+     ],
+     "outputModalities": [
+      "text"
+     ]
+    },
+    "huggingFaceId": "zai-org/GLM-5.3-Flash",
+    "quantization": "fp8",
+    "maxOutputLength": 1048576,
+    "supportedSamplingParameters": [
+     "temperature",
+     "top_p",
+     "top_k",
+     "min_p",
+     "frequency_penalty",
+     "presence_penalty",
+     "repetition_penalty",
+     "max_tokens",
+     "stop",
+     "seed",
+     "logit_bias"
+    ],
+    "supportedFeatures": [
+     "tools",
+     "structured_outputs",
+     "reasoning",
+     "json_mode"
+    ],
+    "isReady": true,
+    "openrouterSlug": "z-ai/glm-5.3-flash"
+   }
+  }
+ ]
+}

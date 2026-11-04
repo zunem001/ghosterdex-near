@@ -8,7 +8,12 @@
     "node": ">=22.6"
   },
   "scripts": {
-    "build:kit": "node agent/build.mjs"
+    "build:kit": "node agent/build.mjs",
+    "verify:kit": "node demo/verify-kit.mjs",
+    "test": "node --import tsx --test test/near-ai.test.ts test/pay-with.test.ts test/landing.test.ts",
+    "demo:models": "tsx demo/near-ai-models.ts",
+    "demo:wallet": "tsx demo/wallet-mcp.ts",
+    "demo:attestation": "tsx demo/verify-attestation.ts"
   },
   "dependencies": {
     "@noble/hashes": "1.8.0",
@@ -21,7 +26,8 @@
   "devDependencies": {
     "esbuild": "0.28.1",
     "tsx": "4.23.0",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "@phala/dcap-qvl": "0.7.1"
   },
   "overrides": {
     "@ton/crypto-primitives": "2.1.0",
