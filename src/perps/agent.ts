@@ -40,17 +40,7 @@ import { perpsKey } from './scope';
 secp.etc.hmacSha256Sync = (k: Uint8Array, ...m: Uint8Array[]) =>
   hmac(sha256, k, secp.etc.concatBytes(...m));
 
-/* Scoped to the proven wallet, exactly like the master key in ./local.
- *
- * This was a fixed path, and scoping the master key alone left the SAME bug
- * standing for the other signer this browser can hold: wallet B connecting in
- * a shared browser read wallet A's agent key and could open and close
- * positions on A's Hyperliquid account. The venue refuses withdraw3 and
- * sendAsset for an agent, so the ceiling is "trade badly with someone else's
- * margin" rather than "take it", which is a smaller hole and the same shape.
- *
- * Found by attacking the shipped 2.8.7 fix rather than its design; the design
- * pass never looked at this file. */
+/* Scoped to the proven wallet, exactly like the master key in ./local. */
 const STORE_BASE = 'ghoster.perps.agent';
 function agentKeyPath(): string | null {
   return perpsKey(STORE_BASE);
@@ -401,10 +391,8 @@ export const agentSigner = {
    * The callers pass `{ coin, asset, usd }` with a signed dollar amount, not
    * `ntli`: that conversion belongs to the signer, and the native one does it
    * (`Math.round(usd * 1e6)`, then isBuy hardcoded true, per
-   * HlAction.updateIsolatedMarginAction). This mirrors it exactly. Reading a
-   * non-existent `o.ntli` produced `undefined`, which the packer drops from
-   * the map, so the action lost two of its four fields and the venue was
-   * asked something that was not the instruction on the screen.
+   * HlAction.updateIsolatedMarginAction). This mirrors it exactly, so the action
+   * carries all four of its fields.
    */
   signHlMargin(o: { asset: number; usd: number; testnet?: boolean }) {
     const usd = Number(o.usd);
@@ -481,13 +469,8 @@ export const agentSigner = {
 /**
  * Attach the refusals, on whichever object is about to be handed out.
  *
- * Applied per object rather than once, because these were originally defined
- * non-enumerable on `agentSigner` alone and then spread into the published
- * object, and spread copies only *enumerable* own properties, so they were
- * dropped on the way out. The result still refused to sign, which is why it
- * looked fine, but it refused with "is not a function" instead of saying why,
- * and the boundary this file exists to state was absent from the only object
- * anything actually calls.
+ * Applied per object rather than once: a spread copies only *enumerable* own properties, so a refusal defined on
+ * another object would not come along.
  */
 function guard<T extends object>(target: T): T {
   for (const name of FORBIDDEN) {

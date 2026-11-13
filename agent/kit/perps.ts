@@ -1,6 +1,5 @@
 /**
- * Perps for an agent, Hyperliquid and Aster combined (owner, 2026-10-08:
- * "the ai agents will be able to use hyperliquid and aster combined").
+ * Perps for an agent, Hyperliquid and Aster combined.
  *
  * One trading account, one address on both venues (aster.ts asterKeys), one
  * set of owner rules over both: a switch, a leverage cap, and a cap on the
@@ -22,11 +21,13 @@ import {
   asterOrder,
   asterStatus,
   asterWithdraw,
+  asterAccount,
+  asterKeys,
   loadAster,
   perpsRules,
   type PerpsRules,
 } from './aster';
-import { hlAdvance, hlCancel, hlClose, hlDeposit, hlHome, hlMarkets, hlOrder, hlStatus, hlWithdraw, loadHl } from './hyperliquid';
+import { hlAccount, hlAdvance, hlCancel, hlClose, hlDeposit, hlHome, hlMarkets, hlOrder, hlStatus, hlWithdraw, loadHl } from './hyperliquid';
 import { isAll } from './amounts';
 
 export type Venue = 'hyperliquid' | 'aster';
@@ -67,6 +68,16 @@ async function both(k: Kit, venue: unknown): Promise<Venue[]> {
   if (loadHl() && !open.includes('hyperliquid')) open.push('hyperliquid');
   if (loadAster() && !open.includes('aster')) open.push('aster');
   return open.length ? open : ['hyperliquid'];
+}
+
+/** Whether money sits on a venue. A venue that does not answer counts only when this machine has used it. */
+export async function perpsHolds(k: Kit): Promise<boolean> {
+  const keys = await asterKeys(k);
+  const hl = await hlAccount(keys.address).catch(() => null);
+  if (hl ? hl.equity >= 0.5 : Boolean(loadHl())) return true;
+  if (!loadAster()) return false;
+  const aster = await asterAccount(keys).catch(() => null);
+  return !aster || aster.equity >= 0.5;
 }
 
 export async function perpsStatus(k: Kit) {

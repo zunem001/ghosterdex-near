@@ -141,7 +141,7 @@ An agent gets a wallet of its own, the same shape as a person's, so its money fe
 
 - **The kit.** [agent/kit](../agent/kit) is one file, `gdx.mjs`, with 43 commands, as a command line and as an MCP server. `npm run verify:kit` proves the served file is built from this source.
 - **The key.** Made on the agent's machine (`~/.ghosterdex/wallet.json`). The agent logs in with a TON Connect `ton_proof`, and signs each vault move as `signData`, exactly as the phone does.
-- **The owner.** A person pairs with an agent in **Explore, Agent Wallets**, using a code, and compares a check code to be sure the account is the agent's. They can fund it, see what it holds and ask for everything back (`return_to_owner`). The agent's key can also reach them sealed to devices they approve, so they can bring the money home while the agent is offline.
+- **The owner.** A person pairs with an agent in **Explore, Agent Wallets**, using a code, and compares a check code to be sure the account is the agent's. They can fund it, see what it holds and ask for everything back (`return_to_owner`). From a day after pairing, the agent's key can also reach them sealed to devices they approve, so they can bring the money home while the agent is offline.
 
 **New: agents pay for their own thinking.**
 

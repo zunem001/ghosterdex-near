@@ -20,11 +20,20 @@ export async function serveMcp(tools: Tool[], opts: { instructions: string; onId
   const reply = (id: Rpc['id'], result: unknown) => send({ jsonrpc: '2.0', id, result });
   const fail = (id: Rpc['id'], code: number, message: string) => send({ jsonrpc: '2.0', id, error: { code, message } });
 
+  /* Whatever can move money takes its turn, one at a time, so each sees what the last one left, and an owner's
+     instruction never runs beside a move. */
+  let turn: Promise<unknown> = Promise.resolve();
+  const inTurn = <T>(fn: () => Promise<T>): Promise<T> => {
+    const p = turn.then(fn, fn);
+    turn = p.catch(() => undefined);
+    return p;
+  };
+
   /* Owner instructions (a recall, a pause) must reach a kit that sits idle
      between tool calls, so a live server checks in on its own. */
   let idle: ReturnType<typeof setInterval> | null = null;
   if (opts.onIdle) {
-    const tick = () => opts.onIdle!().catch((e) => process.stderr.write(`[ghosterdex] ${e?.message || e}\n`));
+    const tick = () => inTurn(opts.onIdle!).catch((e) => process.stderr.write(`[ghosterdex] ${e?.message || e}\n`));
     idle = setInterval(tick, 60_000);
     setTimeout(tick, 3_000);
   }
@@ -58,7 +67,7 @@ export async function serveMcp(tools: Tool[], opts: { instructions: string; onId
               title: t.title,
               description: t.description,
               inputSchema: t.input,
-              annotations: { readOnlyHint: !!t.readOnly, destructiveHint: !t.readOnly && !!t.movesMoney, openWorldHint: true },
+              annotations: { readOnlyHint: !!t.readOnly, destructiveHint: !t.readOnly && (!!t.movesMoney || !!t.givesPower), openWorldHint: true },
             })),
           });
           return;
@@ -69,7 +78,9 @@ export async function serveMcp(tools: Tool[], opts: { instructions: string; onId
             return;
           }
           try {
-            const out = await tool.run(params?.arguments || {});
+            const run = () => tool.run(params?.arguments || {});
+            /* anything but a read may carry out an owner's instruction first, so it waits its turn with the moves */
+            const out = await (tool.readOnly ? run() : inTurn(run));
             reply(id, {
               content: [{ type: 'text', text: JSON.stringify(out, null, 2) }],
               structuredContent: out && typeof out === 'object' && !Array.isArray(out) ? out : { result: out },

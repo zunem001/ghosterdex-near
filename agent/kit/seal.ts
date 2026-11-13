@@ -10,8 +10,9 @@
  * one-time key per copy from this machine's checked randomness). GhosterDex
  * keeps copies it cannot read.
  *
- * GDX_SEAL=off keeps the key on this machine only and withdraws any copies;
- * the owner then gets money back the slower way, through the kit.
+ * GDX_SEAL=off keeps the key on this machine only and withdraws any copies,
+ * and it holds until GDX_SEAL=on; the owner then gets money back the slower
+ * way, through the kit.
  */
 import nacl from 'tweetnacl';
 import { signedBy, type WalletSig } from './sign';
@@ -40,26 +41,49 @@ export function deviceApproved(ownerKey: string, d: OwnerDevice): boolean {
 }
 
 /**
- * The owner key this kit trusts. The first one GhosterDex names is pinned in
- * wallet.json and kept; only pairing again, which the owner starts with a new
- * code, replaces it. Answers the pinned key, or null when there is none.
- * `via` records which it was, because only an explicit pairing may undo what
- * a previous owner was given (kit.ts keepOwnerControl).
+ * The owner key this kit trusts: pinned only by a pairing on this machine, and
+ * kept. Answers the pinned key, or null when there is none. `how` is that
+ * pairing: 'person' when someone at a terminal confirmed the key, 'pair' when
+ * nobody could, and then the key waits a day before it is given anything
+ * (ownerHeld).
  */
-export function pinOwner(ks: Keystore, key: string | null | undefined, repin = false): string | null {
+export function pinOwner(ks: Keystore, key?: string | null, how?: 'pair' | 'person'): string | null {
   const k = String(key || '').toLowerCase();
-  /* a copy loaded before the pin was made must take the file's pin, never make its own */
-  if (!repin && !ks.owner) refreshTrust(ks);
-  if (/^[0-9a-f]{64}$/.test(k) && (repin || !ks.owner) && ks.owner?.key !== k) {
-    ks.owner = { key: k, pinnedAt: new Date().toISOString(), via: repin ? 'pair' : 'first' };
-    saveKeystore(ks);
+  /* a copy loaded before the pin was made must take the file's pin */
+  if (!how) refreshTrust(ks);
+  if (how && /^[0-9a-f]{64}$/.test(k)) {
+    if (ks.owner?.key !== k) {
+      ks.owner = { key: k, pinnedAt: new Date().toISOString(), via: 'pair', ...(how === 'pair' ? { holdUntil: Date.now() + OWNER_HOLD_MS } : {}) };
+      saveKeystore(ks);
+    } else if (how === 'person' && ks.owner?.holdUntil) {
+      delete ks.owner.holdUntil;
+      saveKeystore(ks);
+    }
   }
   return ks.owner?.key || null;
 }
 
-/** Whether this machine keeps its key to itself (GDX_SEAL=off). */
-export function sealingOff(): boolean {
-  return /^(0|off|no|false)$/i.test(String(process.env.GDX_SEAL || '').trim());
+/** how long a key pinned with no person at a terminal waits before it gets a sealed copy or a hand on the Gram wallet */
+export const OWNER_HOLD_MS = 24 * 3600_000;
+
+export function ownerHeld(ks: Keystore, now = Date.now()): boolean {
+  return Number(ks.owner?.holdUntil || 0) > now;
+}
+
+/** The owner key as a person compares it: the start and end of the GhosterDex address in their app. */
+export function ownerTag(key: string): string {
+  return `${key.slice(0, 6)}…${key.slice(-6)}`;
+}
+
+/** Whether this machine keeps its key to itself. GDX_SEAL=off says so, and it holds until GDX_SEAL=on, set or not. */
+export function sealingOff(ks: Keystore): boolean {
+  const v = String(process.env.GDX_SEAL || '').trim();
+  const asked = /^(0|off|no|false)$/i.test(v) ? true : /^(1|on|yes|true)$/i.test(v) ? false : null;
+  if (asked !== null && Boolean(ks.sealChoice?.off) !== asked) {
+    ks.sealChoice = { off: asked, at: new Date().toISOString() };
+    saveKeystore(ks);
+  }
+  return Boolean(ks.sealChoice?.off);
 }
 
 /** One copy of `plain` that only the holder of `devicePk`'s secret can open. `random` is 56 fresh bytes. */

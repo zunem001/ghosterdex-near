@@ -1,5 +1,5 @@
 /**
- * Assets NEAR Intents has moved to a new id (owner, 2026-10-30: "do all three, start with the btc fix").
+ * Assets NEAR Intents has moved to a new id.
  *
  * Bitcoin's own BTC is the first. The catalogue now lists it as "BTC(OMNI)", 1cs_v1:btc:native:coin, and the old
  * bridged asset, nep141:btc.omft.near, is one way: solvers still take it (sell, withdraw, switch to the new one) but

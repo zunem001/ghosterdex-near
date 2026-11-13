@@ -23,3 +23,10 @@ if (!built.equals(live)) {
   process.exit(1);
 }
 console.log('\nSAME BYTES: the file agents download is built from this source.');
+
+/* the name agents actually fetch moves to each new version; the versioned name above never changes */
+const now = await fetch('https://ghosterdex.com/agent/gdx.mjs');
+if (now.ok) {
+  const current = Buffer.from(await now.arrayBuffer());
+  console.log(current.equals(built) ? 'gdx.mjs, the current download, is this same build.' : 'gdx.mjs, the current download, is a later version.');
+}

@@ -10,11 +10,12 @@
 import { Address, beginCell, external, internal, SendMode, storeMessage, type Cell } from '@ton/core';
 import { ApiError, Client } from './client';
 import { signText } from './sign';
-import { keysOf, homeDir, ownerGramWallets, refreshTrust, saveKeystore, walletFor, type Keys, type Keystore } from './wallet';
+import { keysOf, homeDir, ownerGramWallets, ownerSweepWallets, refreshTrust, saveKeystore, walletFor, type Keys, type Keystore } from './wallet';
 import { fromRaw, isAll, toRaw, usd } from './amounts';
-import { deviceApproved, pinOwner, sealFor, sealingOff, type OwnerDevice } from './seal';
+import { deviceApproved, ownerHeld, pinOwner, sealFor, sealingOff, type OwnerDevice } from './seal';
+import { linkRefusal, spendRefusal } from './intent';
 import { strongBytes } from './entropy';
-import { perpsAdvance, perpsHome } from './perps';
+import { perpsAdvance, perpsHolds, perpsHome } from './perps';
 
 export class KitError extends Error {
   hint?: string;
@@ -160,9 +161,8 @@ export class Kit {
    *
    * GhosterDex answers with the venue's own figures through the true-balance
    * link, or says `unavailable` when it could not ask: never a guess, since a
-   * figure nobody can spend is worse than none. An unavailable answer used to
-   * read as an empty vault here, so a recall reported "nothing to send" over
-   * money that was there. The link lasts a week from a signature, so a quiet
+   * figure nobody can spend is worse than none, and an empty vault is not what
+   * an unread one is. The link lasts a week from a signature, so a quiet
    * agent's may have lapsed: it is made again and the venue asked once more,
    * and only then is the read refused, with a code the caller can act on.
    */
@@ -176,13 +176,16 @@ export class Kit {
         hint: 'Try again in a moment.',
       });
     }
-    return (r.confidential || []).filter((b) => {
-      try {
-        return BigInt(b.raw || '0') > 0n;
-      } catch {
-        return false;
-      }
-    });
+    return (r.confidential || [])
+      .filter((b) => {
+        try {
+          return BigInt(b.raw || '0') > 0n;
+        } catch {
+          return false;
+        }
+      })
+      /* a balance row says what it is worth, not what one is worth */
+      .map((b) => (b.price > 0 ? b : { ...b, price: b.amount > 0 ? b.usd / b.amount : 0 }));
   }
 
   /**
@@ -195,6 +198,8 @@ export class Kit {
     try {
       const ch = await this.c.call<{ message?: string }>('/api/confbal/challenge');
       if (!ch?.message) return false;
+      /* the link moves nothing, so what it signs must move nothing */
+      if (linkRefusal(ch.message, this.ks.publicKey)) return false;
       const sig = signText(await this.keys(), this.ks.address, ch.message);
       await this.c.call('/api/confbal/link', { body: { walletSig: sig } });
       return true;
@@ -295,6 +300,41 @@ export class Kit {
     throw new KitError(`That is more ${sym} than this account holds (${fromRaw(total, token.decimals)}).`, { code: 'insufficient' });
   }
 
+  /** Whether this account holds anything worth a thought: an unread balance counts as yes. */
+  async holdsMoney(): Promise<boolean> {
+    try {
+      if ((await this.balances()).some((b) => !(b.usd > 0) || b.usd >= 0.5)) return true;
+      const acct = await this.gramAccount();
+      if (BigInt(acct.balance || '0') > 100_000_000n) return true;
+      const snap = await this.gramSnapshot(true);
+      if (!snap.jettons || snap.jettons.some((j) => (j.verified && BigInt(j.raw || '0') > 0n) || Number(j.usd) >= 0.5)) return true;
+      const limits = await this.c.call<{ orders?: Array<{ status?: string }> }>('/api/limit/orders?fresh=1');
+      if ((limits.orders || []).some((o) => !['filled', 'expired', 'canceled', 'draft'].includes(String(o.status)))) return true;
+      return await perpsHolds(this);
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Where money going home may go: the owner this kit pinned, whatever GhosterDex names. The vault's address is the
+   * owner's key, and a Gram wallet counts only when it is one this kit works out from that key.
+   */
+  ownerHome(me: AgentMe): { vault: string | null; gram: string | null; why?: string } {
+    refreshTrust(this.ks);
+    const pin = this.ks.owner?.key;
+    if (!pin) return { vault: null, gram: null, why: 'this machine has not paired with an owner: pair with the code again' };
+    const named = String(me.owner?.vaultAddress || '').toLowerCase();
+    const vault = named === pin ? pin : null;
+    let gram: string | null = null;
+    try {
+      if (me.owner?.gramAddress && ownerSweepWallets(pin).includes(Address.parse(me.owner.gramAddress).toRawString())) gram = me.owner.gramAddress;
+    } catch {
+      /* no wallet this kit can name */
+    }
+    return { vault, gram, ...(vault ? {} : { why: 'the owner GhosterDex names is not the one this machine paired with' }) };
+  }
+
   /* ----------------------------------------------------- owner and rules */
 
   /**
@@ -304,21 +344,21 @@ export class Kit {
    */
   async obeyOwner(): Promise<{ recalled?: unknown; withdrew?: unknown[] } | null> {
     if (this.recalling) return null;
-    let me: AgentMe;
-    try {
-      me = await this.me(true);
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 404) return null; // not registered yet
-      throw e;
-    }
-    await this.keepSealed(me);
-    await this.keepOwnerControl(me);
-    /* a move to or from a perps venue that an earlier command started carries on here (perps.ts) */
-    await perpsAdvance(this).catch(() => null);
-    const recall = me.instructions.find((i) => i.type === 'recall');
-    if (!recall) return this.giveBackParts(me);
     this.recalling = true;
     try {
+      let me: AgentMe;
+      try {
+        me = await this.me(true);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return null; // not registered yet
+        throw e;
+      }
+      await this.keepSealed(me);
+      await this.keepOwnerControl(me);
+      /* a move to or from a perps venue that an earlier command started carries on here (perps.ts) */
+      await perpsAdvance(this).catch(() => null);
+      const recall = me.instructions.find((i) => i.type === 'recall');
+      if (!recall) return await this.giveBackParts(me);
       const result = await this.returnEverything(me);
       /* a vault that could not be read is no answer: the recall stays pending and runs again next time */
       if (!result.retry) {
@@ -326,10 +366,10 @@ export class Kit {
           .call('/api/agent/v1/commands/ack', { body: { id: recall.id, ok: result.ok, note: result.note } })
           .catch(() => undefined);
       }
+      this._me = undefined;
       return { recalled: result };
     } finally {
       this.recalling = false;
-      this._me = undefined;
     }
   }
 
@@ -342,9 +382,11 @@ export class Kit {
   async keepSealed(me: AgentMe): Promise<void> {
     try {
       if (!me.paired || !me.owner) return;
-      const pin = pinOwner(this.ks, me.owner.key);
+      const pin = pinOwner(this.ks);
+      /* no pin says nothing about the copies a pairing made: a restored wallet leaves them be */
+      if (!pin) return;
       const want =
-        pin && !sealingOff()
+        !sealingOff(this.ks) && !ownerHeld(this.ks)
           ? [...new Set((me.owner.devices || []).filter((d) => deviceApproved(pin, d)).map((d) => d.pk))].slice(0, 5)
           : [];
       const have = me.sealedTo || [];
@@ -365,14 +407,14 @@ export class Kit {
    * The owner's own Gram wallet as one this Gram wallet lets act for it (a
    * wallet v5 extension), so the owner can move it, or switch this key off,
    * from their own wallet and without this machine: the way TON's agentic
-   * wallets work (owner, 2026-09-26).
+   * wallets work.
    *
    * The rules it keeps. The address is one this kit works out itself from the
    * owner key it pinned (ownerGramWallets); the server's word counts only
    * when it names one of those. It is installed once, only when missing on
    * chain, and recorded. A previous owner's is removed only after an explicit
-   * pairing on this machine replaced the pin (never a pin made at first
-   * sight, never on the server's word), and only one this kit recorded, so a
+   * pairing on this machine replaced the pin (never on the server's word,
+   * never by a kit's older pin at first sight), and only one this kit recorded, so a
    * new owner is never sharing the wallet with the last one. The kit never
    * switches its own key off: that is the owner's. It waits for the wallet to
    * hold a little Gram, makes one change per command, and waits for the seqno
@@ -382,7 +424,7 @@ export class Kit {
     try {
       if (!me.paired || !me.owner) return;
       refreshTrust(this.ks);
-      const pin = pinOwner(this.ks, me.owner.key);
+      const pin = pinOwner(this.ks);
       if (!pin) return;
       const mine = ownerGramWallets(pin);
       let target = '';
@@ -400,7 +442,8 @@ export class Kit {
           : [];
       /* a pause lets only the owner's install through (worker ownerExtensionOnly), so a removal waits for the resume */
       const remove = !me.paused && stale.length ? stale[0].address : '';
-      const install = !remove && target && !ctl.extensions.includes(target) ? target : '';
+      /* a key on hold waits for its own hand on this wallet; the owner it replaced goes at once */
+      const install = !remove && !ownerHeld(this.ks) && target && !ctl.extensions.includes(target) ? target : '';
       if ((!remove && !install) || ctl.signatureAllowed === false) return;
       const acct = await this.gramAccount();
       if (BigInt(acct.balance || '0') < 30_000_000n) return; // the next command, once it holds Gram
@@ -459,8 +502,9 @@ export class Kit {
         let ok = false;
         let note = '';
         try {
-          const ownerVault = me.owner?.vaultAddress;
-          if (!ownerVault) throw new KitError('the owner has no vault address on record');
+          const home = this.ownerHome(me);
+          const ownerVault = home.vault;
+          if (!ownerVault) throw new KitError(home.why || 'the owner has no vault address on record');
           const src = await this.source(String(w.coin || ''), String(w.amount || 'all'));
           const r = await this.route({ kind: 'send', origin: src.token, dest: src.token, raw: src.raw, recipient: ownerVault, waitMs: 0 });
           ok = true;
@@ -493,43 +537,44 @@ export class Kit {
        withdrawn, and every later run carrying them home (perps.ts perpsHome).
        Until it is all in the vault the recall stays open, so what lands is
        sent on too. */
+    const home = this.ownerHome(me);
+    /* nothing moves on the word of an owner this machine did not pair with: perps stay where they are too */
+    if (!home.vault) return { ok: false, note: `Nothing was sent: ${home.why}.`, moves };
     const aster = await perpsHome(this).catch((e: any) => ({ done: false, note: `Perps: ${e?.message || e}` }));
-    const ownerVault = me.owner?.vaultAddress;
-    if (ownerVault) {
-      let held: Balance[];
-      try {
-        held = await this.balances();
-      } catch (e: any) {
-        if (e?.code !== 'balance_unavailable') throw e;
-        return { ok: false, retry: true, note: 'The vault balance could not be read, so nothing was sent yet. It will be tried again on the next run.', moves };
-      }
-      for (const b of held) {
-        if (b.rwa) {
-          notes.push(`${b.symbol} is a stock and cannot be sent; sell it first`);
-          ok = false;
-          continue;
-        }
-        if (b.usd > 0 && b.usd < 0.05) continue; // dust costs more to move than it is worth
-        try {
-          const r = await this.route({
-            kind: 'send',
-            origin: b,
-            dest: b,
-            raw: BigInt(b.raw),
-            recipient: ownerVault,
-            waitMs: 0,
-          });
-          moves.push({ coin: b.symbol, amount: fromRaw(b.raw, b.decimals), id: r.id });
-        } catch (e: any) {
-          ok = false;
-          notes.push(`${b.symbol}: ${e?.message || e}`);
-        }
-      }
-    } else {
-      ok = false;
-      notes.push('the owner has no vault address on record');
+    let held: Balance[];
+    try {
+      held = await this.balances();
+    } catch (e: any) {
+      if (e?.code !== 'balance_unavailable') throw e;
+      return { ok: false, retry: true, note: 'The vault balance could not be read, so nothing was sent yet. It will be tried again on the next run.', moves };
     }
-    const ownerGram = me.owner?.gramAddress;
+    for (const b of held) {
+      if (b.rwa) {
+        notes.push(`${b.symbol} is a stock and cannot be sent; sell it first`);
+        ok = false;
+        continue;
+      }
+      if (b.usd > 0 && b.usd < 0.05) continue; // dust costs more to move than it is worth
+      try {
+        const r = await this.route({
+          kind: 'send',
+          origin: b,
+          dest: b,
+          raw: BigInt(b.raw),
+          recipient: home.vault,
+          waitMs: 0,
+        });
+        moves.push({ coin: b.symbol, amount: fromRaw(b.raw, b.decimals), id: r.id });
+      } catch (e: any) {
+        ok = false;
+        notes.push(`${b.symbol}: ${e?.message || e}`);
+      }
+    }
+    const ownerGram = home.gram;
+    if (me.owner?.gramAddress && !ownerGram) {
+      ok = false;
+      notes.push('the Gram wallet stays put: the wallet on record is not one this machine can work out from the key it paired with');
+    }
     if (ownerGram) {
       try {
         const g = await this.gramSweep(ownerGram);
@@ -578,13 +623,15 @@ export class Kit {
     if (!q.depositAddress || !q.signPayload) {
       throw new KitError('GhosterDex did not prepare this move for signing. Try again in a moment.');
     }
-    await this.execute(q, o.kind, o.approvalWaitMs);
+    await this.execute(q, o.kind, { assetId: o.origin.assetId, raw: o.raw }, o.approvalWaitMs);
     const status = o.waitMs ? await this.follow(q.depositAddress, o.waitMs) : 'PROCESSING';
     return { id: q.depositAddress, status, quote: q };
   }
 
-  /** Sign the prepared text with this key, then hand the signature in. */
-  async execute(q: { quoteId: string; depositAddress?: string; signPayload?: string }, kind: string, approvalWaitMs?: number) {
+  /** Read the prepared text against what was asked (intent.ts), sign it with this key, then hand the signature in. */
+  async execute(q: { quoteId: string; depositAddress?: string; signPayload?: string }, kind: string, want: { assetId: string; raw: bigint }, approvalWaitMs?: number) {
+    const no = spendRefusal(q.signPayload, { account: this.ks.publicKey, receiver: String(q.depositAddress || ''), assetId: want.assetId, maxRaw: want.raw });
+    if (no) throw new KitError(`What came back to sign is not what was asked: ${no}. Nothing was signed, and nothing moved.`, { code: 'refused_to_sign', hint: 'Try again. If it happens again, stop and tell your human.' });
     const keys = await this.keys();
     const sig = signText(keys, this.ks.address, q.signPayload!);
     return this.withApproval(

@@ -103,12 +103,12 @@ export function signingHash(tx: EvmTx): Uint8Array {
 /** The signed transaction as the hex `eth_sendRawTransaction` takes. */
 export function signEvmTx(tx: EvmTx, priv: Uint8Array): string {
   const sig = secp.sign(signingHash(tx), priv, { lowS: true });
-  const compact = sig.toCompactRawBytes();
   const signed = rlp([
     ...fields(tx),
     intBytes(sig.recovery), // y parity, 0 or 1
-    compact.slice(0, 32),
-    compact.slice(32, 64),
+    /* integers: RLP gives them no leading zero, so r and s are as long as their values */
+    intBytes(sig.r),
+    intBytes(sig.s),
   ]);
   return toHex(cat(Uint8Array.from([0x02]), signed));
 }

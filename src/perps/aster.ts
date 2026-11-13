@@ -122,12 +122,16 @@ export interface AsterApproval {
  * The approval's parameters, in the order Aster's message lays them out.
  * Trading only: no spot, no withdrawal, no server addresses.
  */
+/** the longest an approved key may last */
+const ASTER_APPROVAL_MAX_MS = 183 * 86_400_000;
+
 export function asterApprovalParams(a: AsterApproval): Record<string, string> {
   if (!/^0x[0-9a-fA-F]{40}$/.test(a.user)) throw new Error('aster: the user is not an address');
   if (!/^0x[0-9a-fA-F]{40}$/.test(a.agentAddress)) throw new Error('aster: the agent is not an address');
   // Sixteen characters at most: Aster's testnet refused a nineteen-letter name as an "illegal parameter".
   if (!/^[a-z0-9-]{1,16}$/.test(a.agentName)) throw new Error('aster: an agent needs a short plain name, 16 characters or fewer');
   if (!(a.expired > Date.now())) throw new Error('aster: the approval would already have expired');
+  if (a.expired > Date.now() + ASTER_APPROVAL_MAX_MS) throw new Error('aster: an approval lasts half a year at most');
   return {
     user: a.user,
     nonce: a.nonce ?? asterNonce(),

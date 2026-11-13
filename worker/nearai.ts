@@ -1,7 +1,5 @@
 /**
- * NEAR AI Cloud in Private AI, beside Cocoon (owner, 2026-10-20: "i want you to add near ai to the private ai
- * aswell", then, asked: every model, the non-private ones too and clearly labelled; at cost; open to everyone
- * once it answers).
+ * NEAR AI Cloud in Private AI, beside Cocoon: every model, the non-private ones too and clearly labelled; at cost; open to everyone once it answers.
  *
  * NEAR AI speaks OpenAI's chat completions at https://cloud-api.near.ai/v1, behind a key the owner holds as
  * the secret NEAR_AI_API_KEY. Its public catalogue (GET /v1/model/list) names every model with its price per
@@ -16,7 +14,7 @@
  * Only chat models are offered: text in and text out, a context of 8k tokens or more, and a cap on the answer
  * the model honours (max_tokens in its own list), since the hold on a person's credit is bounded by it. Each
  * request then carries only the settings that model takes. Prices are NEAR AI's own, plus the owner's margin
- * (KV aimargin, 0 by the owner's word), with cached input at NEAR AI's cached price. The catalogue is read at
+ * (KV aimargin, 0), with cached input at NEAR AI's cached price. The catalogue is read at
  * most hourly and kept, so an outage of the list never empties the menu.
  */
 
@@ -98,9 +96,7 @@ export const NEAR_DEFAULT = 'z-ai/glm-5.3-flash';
 const NOT_CHAT = /whisper|rerank|embedding|privacy-filter|moderation|jev-|flux/i;
 /**
  * A model with its refusals taken out, in NEAR AI's words for red teaming, security research and evaluations.
- * Hidden unless named here (owner, 2026-10-30), so a new one waits for the owner's word. These two are open on API
- * keys alone (owner, 2026-11-03: "please do not keep it hidden, make it open", "make them open", after being told
- * that way was API keys, under a warning, out of the free chat and agents): aiModels (worker/aimodels.ts) leaves
+ * Hidden unless named here, so a new one stays hidden until it is named. These two are open on API keys alone, under a warning, out of the free chat and agents: aiModels (worker/aimodels.ts) leaves
  * them out, so the chat and an agent cannot reach one, and only a person's key may name one (worker/aiapi.ts).
  */
 const NO_REFUSALS = /abliterat|ablated|uncensored|decensored|unfiltered|unrestricted|heretic|jailbr[eo]|no-?refusal/i;
@@ -108,8 +104,7 @@ const OPEN_NO_REFUSALS: ReadonlySet<string> = new Set(['deepseek-ai/DeepSeek-V4.
 
 /**
  * Models NEAR AI lists with no sampling parameters at all, so none shows the reply cap Private AI bills by. Each was
- * measured instead (owner, 2026-10-30: "do all three"; the abliterated DeepSeek on
- * 2026-11-03, probe-abl): asked for three paragraphs
+ * measured instead: asked for three paragraphs
  * under a 48-token cap, each stopped there (finish "length") and said what it used, whole and streamed; given room,
  * each answered clean, the thinking ones in a field of their own. They are offered with max_tokens alone, and
  * `reasons` gives a thinker its room to think. A list of their own, if NEAR AI ever adds one, is used instead.
@@ -252,20 +247,15 @@ const CATALOGUE_TTL_MS = 60 * 60_000;
 export const CATALOGUE_STALE_MS = 3 * 24 * 60 * 60_000;
 /** what this isolate holds: the list (or that there was none) until `until`, and when NEAR AI gave that list */
 let _cat: { until: number; raw: unknown; read: number } | null = null;
-let _reading: Promise<unknown> | null = null;
-
 /**
  * NEAR AI's catalogue as last read: hourly at most, kept in KV for every isolate. When the list cannot be read,
  * a copy up to three days old is used, so a passing outage never empties the menu and a long one never bills
- * at old prices. One read at a time per isolate, and a failed one is not tried again for a minute.
+ * at old prices. A failed read is not tried again for a minute. Each request reads for itself: a promise made in one
+ * request cannot be awaited safely from another, and two reads at once cost nothing.
  */
 export async function nearCatalogue(env: NearAiEnv, fetcher: typeof fetch = fetch, now = Date.now()): Promise<unknown> {
   if (_cat && now < _cat.until) return _cat.raw && now - _cat.read < CATALOGUE_STALE_MS ? _cat.raw : null;
-  if (_reading) return _reading;
-  _reading = readCatalogue(env, fetcher, now).finally(() => {
-    _reading = null;
-  });
-  return _reading;
+  return readCatalogue(env, fetcher, now);
 }
 
 async function readCatalogue(env: NearAiEnv, fetcher: typeof fetch, now: number): Promise<unknown> {
@@ -295,7 +285,6 @@ async function readCatalogue(env: NearAiEnv, fetcher: typeof fetch, now: number)
 }
 export function forgetCatalogue() {
   _cat = null;
-  _reading = null;
 }
 
 /** NEAR AI's models at the price a person pays, each ready only when the key is set. */

@@ -7,7 +7,7 @@
  * contract the phone makes). The phrase is a standard 24 word TON phrase, so
  * the owner can import it into GhosterDex on a phone and see the same money.
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -17,6 +17,7 @@ import { mnemonicToPrivateKey, mnemonicValidate } from '@ton/crypto/dist/mnemoni
 import { wordlist as mnemonicWordList } from '@ton/crypto/dist/mnemonic/wordlist';
 import { WalletContractV5R1 } from '@ton/ton/dist/wallets/v5r1/WalletContractV5R1';
 import { WalletContractV4 } from '@ton/ton/dist/wallets/WalletContractV4';
+import { WalletContractV3R2 } from '@ton/ton/dist/wallets/WalletContractV3R2';
 import { strongBytes } from './entropy';
 
 export type Keystore = {
@@ -38,10 +39,13 @@ export type Keystore = {
   /**
    * The owner key pinned at pairing: only devices it approved get a sealed
    * copy (seal.ts), and only its wallets act for the Gram wallet. `via` says
-   * how it was set: 'pair' by an explicit pairing on this machine, 'first' at
-   * first sight of an owner paired before the kit pinned (seal.ts pinOwner).
+   * how it was set: 'pair' by an explicit pairing on this machine, 'first' by a
+   * kit before 1.9.1, at first sight. holdUntil: a pairing with no person at a
+   * terminal gives nothing up before this (seal.ts ownerHeld).
    */
-  owner?: { key: string; pinnedAt: string; via?: 'pair' | 'first' };
+  owner?: { key: string; pinnedAt: string; via?: 'pair' | 'first'; holdUntil?: number };
+  /** GDX_SEAL, as last set on this machine: it holds for every later command, set or not */
+  sealChoice?: { off: boolean; at: string };
   /**
    * The owner wallets this kit made extensions of its Gram wallet
    * (keepOwnerControl), each with the pinned key it was derived from. The
@@ -84,7 +88,19 @@ export function loadKeystore(): Keystore {
   }
   const ks = JSON.parse(readFileSync(file, 'utf8')) as Keystore;
   if (ks.kind !== 'ghosterdex-agent' || !ks.mnemonic) throw new Error(`${file} is not a GhosterDex agent wallet.`);
+  keepPrivate(file);
   return ks;
+}
+
+/** The key file is this user's alone: put right when it can be, said plainly when it cannot. */
+function keepPrivate(file: string): void {
+  if (process.platform === 'win32') return;
+  try {
+    if ((statSync(file).mode & 0o077) === 0) return;
+    chmodSync(file, 0o600);
+  } catch {
+    process.stderr.write(`[ghosterdex] ${file} can be read by other users of this machine, and it holds your recovery phrase.\n`);
+  }
 }
 
 /**
@@ -99,6 +115,8 @@ export function keepTrust(ks: Keystore, disk: Keystore | null): void {
   if (!disk || disk.publicKey !== ks.publicKey) return;
   const at = (o?: { pinnedAt?: string }) => Date.parse(o?.pinnedAt || '') || 0;
   if (disk.owner && at(disk.owner) > at(ks.owner)) ks.owner = disk.owner;
+  const chose = (o?: { at?: string }) => Date.parse(o?.at || '') || 0;
+  if (disk.sealChoice && chose(disk.sealChoice) > chose(ks.sealChoice)) ks.sealChoice = disk.sealChoice;
   const ext = [...(ks.ownerExt || [])];
   for (const e of disk.ownerExt || []) if (!ext.some((x) => x.key === e.key && x.address === e.address)) ext.push(e);
   if (ext.length) ks.ownerExt = ext;
@@ -123,8 +141,9 @@ export function saveKeystore(ks: Keystore): void {
   ensureHome();
   const file = keystorePath();
   refreshTrust(ks);
-  const tmp = file + '.tmp';
-  writeFileSync(tmp, JSON.stringify(ks, null, 2), { mode: 0o600 });
+  /* a name of its own, made only if nothing is there: never a shared file, and never through a link someone left */
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(ks, null, 2), { mode: 0o600, flag: 'wx' });
   renameSync(tmp, file);
   try {
     chmodSync(file, 0o600);
@@ -172,6 +191,13 @@ export function ownerGramWallets(ownerKeyHex: string): string[] {
   ];
 }
 
+/** Where a recall may send the Gram wallet: those, and the older wallet GhosterDex also accepts from the same key. */
+export function ownerSweepWallets(ownerKeyHex: string): string[] {
+  const mine = ownerGramWallets(ownerKeyHex);
+  if (!mine.length) return mine;
+  return [...mine, WalletContractV3R2.create({ workchain: 0, publicKey: Buffer.from(ownerKeyHex, 'hex') }).address.toRawString()];
+}
+
 export async function keysOf(ks: Keystore): Promise<Keys> {
   const kp = await mnemonicToPrivateKey(ks.mnemonic.split(' '));
   if (kp.publicKey.toString('hex') !== ks.publicKey) {
@@ -181,7 +207,8 @@ export async function keysOf(ks: Keystore): Promise<Keys> {
 }
 
 export async function createKeystore(opts: { name: string; server: string; mnemonic?: string }): Promise<Keystore> {
-  const phrase = opts.mnemonic ? opts.mnemonic.trim().toLowerCase().split(/\s+/) : await newMnemonic();
+  /* an empty phrase is a wrong phrase, never a request for a new wallet */
+  const phrase = opts.mnemonic !== undefined ? opts.mnemonic.trim().toLowerCase().split(/\s+/) : await newMnemonic();
   if (phrase.length !== 24 || !(await mnemonicValidate(phrase))) {
     throw new Error('That is not a valid 24 word TON recovery phrase.');
   }

@@ -15,10 +15,10 @@
  *   hold     before a question: the most it can cost leaves the balance at
  *            once, refused when the balance cannot cover it or the key is off
  *   settle   after the answer: its true cost stays, the rest comes back
- *   release  the question failed: the whole hold comes back
- *   (alarm)  a hold nobody settled within HOLD_MS comes back
+ *   release  the network did no work: the whole hold comes back
+ *   (alarm)  a hold nobody settled within its life comes back; a stream's is spent
  *
- * The owner's own use is free (the owner's word, 2026-10-14) but still counted,
+ * The owner's own use is free but still counted,
  * so what an answer really costs is measured before anyone else pays for one.
  *
  * Keys live here too. KV keeps only the index from a key's hash to its account
@@ -28,9 +28,7 @@
  * The rules are pure functions over one plain record (applyOp), so the check
  * script runs them without a Durable Object at all.
  *
- * Each settled request also leaves one row in the usage history (owner,
- * 2026-10-24: "there should be logs or usage history like this for the api for
- * the agents wallet and for the other"): the model, its tokens, what the cache
+ * Each settled request also leaves one row in the usage history: the model, its tokens, what the cache
  * read, what it cost and where it came from. The rows live beside the record,
  * one storage key each in time order (u:<ms>:<rand>), written in the same
  * critical section as the charge, and the record keeps a total per day.
@@ -39,6 +37,10 @@
 export const MICRO = 1_000_000;
 /** an unsettled hold comes back after this long: no answer takes a quarter of an hour */
 export const HOLD_MS = 15 * 60_000;
+/** a free question's hold: the chat stops waiting for its answer well before this */
+export const FREE_HOLD_MS = 90_000;
+/** A stream's hold. A stream runs as long as its reader reads, so its hold waits for its end, up to a day. */
+export const STREAM_HOLD_MS = 24 * 3_600_000;
 /** what a top-up may be, in dollars (index.ts /api/ai/credit/order): one list for the phone and the worker */
 export { AI_TOPUPS, AI_CREDIT_MAX, AI_CREDIT_MIN, aiTopupOk } from '../src/lib/aiLimits';
 /** active keys per account */
@@ -59,8 +61,12 @@ const USE_SLACK = 250;
 /** hash is the key's SHA-256, kept so a revocation can delete its index; the key itself is never stored */
 export type AiKey = { id: string; name: string; last4: string; created: number; revoked?: number; hash?: string };
 export type AiUse = { n: number; in: number; out: number; micro: number; last: number };
-/** fb: the most a free request held under a day's cap may cost, counted against the cap until it settles */
-export type AiHold = { micro: number; at: number; key: string; fb?: number };
+/**
+ * fb: the most a free request held under a day's cap may cost, counted against the cap until it settles
+ * life: how long it stands, unless HOLD_MS; spend: a stream's, spent if nobody settles it, since its answer may have
+ * been read; m: the model, for that row
+ */
+export type AiHold = { micro: number; at: number; key: string; fb?: number; life?: number; spend?: 1; m?: string; st?: 1 };
 export type AiTopup = { at: number; micro: number; ref: string; note: string };
 
 /**
@@ -86,6 +92,8 @@ export interface LedgerRecord {
   shortfall: number;
   /** what the account's free API keys spent on one UTC day (the owner's, worker/aiapi.ts) */
   free?: { day: string; micro: number };
+  /** the account's free questions on one UTC day (worker/privateai.ts), counted one at a time */
+  asks?: { day: string; n: number };
   /** the usage history's totals per UTC day, the newest KEEP_DAYS */
   days?: Record<string, AiDay>;
   /** rows the usage history holds, so the object knows when to clear the oldest */
@@ -102,9 +110,13 @@ export type RowFacts = { model?: string; cached?: number; stream?: boolean; ms?:
 export type LedgerOp =
   | { op: 'state' }
   | { op: 'credit'; ref: string; micro: number; note?: string }
-  | { op: 'hold'; micro: number; key: string; free?: boolean; id?: string; freeCap?: number }
+  | { op: 'hold'; micro: number; key: string; free?: boolean; id?: string; freeCap?: number; life?: number; spend?: boolean; model?: string }
+  | { op: 'keep'; hold: string; model?: string }
   | ({ op: 'settle'; hold: string; micro: number; key: string; tokensIn: number; tokensOut: number; free?: boolean } & RowFacts)
   | { op: 'release'; hold: string }
+  /* one of the account's free questions for the day, if any are left; unask gives back one the network did no work for */
+  | { op: 'ask'; day: string; max: number }
+  | { op: 'unask'; day: string }
   | { op: 'addKey'; key: AiKey }
   | { op: 'revokeKey'; id: string }
   | { op: 'expire' }
@@ -112,7 +124,7 @@ export type LedgerOp =
   | ({ op: 'log'; key: string; micro: number; tokensIn: number; tokensOut: number } & RowFacts)
   /* the usage history, newest first: a page before `before`, since `from`, of one model or source; `span` also
      asks for every row since now - span, for a day's figures (the Durable Object answers it, not applyOp) */
-  | { op: 'usage'; before?: string; from?: number; limit?: number; model?: string; key?: string; span?: number };
+  | { op: 'usage'; before?: string; from?: number; limit?: number; model?: string; key?: string; span?: number; live?: boolean };
 
 export type LedgerReply = Record<string, unknown> & { ok: boolean };
 
@@ -126,6 +138,7 @@ function keyLive(l: LedgerRecord, key: string): boolean {
 }
 
 const dayOf = (now: number) => new Date(now).toISOString().slice(0, 10);
+const lifeOf = (h: Pick<AiHold, 'life'>) => h.life ?? HOLD_MS;
 
 /** What the free API keys have spent today: settled, plus the most each free request still on hold may cost. */
 export function freeUsed(l: LedgerRecord, now: number): number {
@@ -200,14 +213,35 @@ export function applyOp(l: LedgerRecord, o: LedgerOp, now: number): LedgerReply 
       const cap = o.free ? whole(o.freeCap) : 0;
       if (cap > 0) {
         const used = freeUsed(l, now);
-        if (used + bound > cap) return { ok: false, why: 'free_cap', used, cap };
+        /* settled: what the day has truly spent, apart from what is only in flight */
+        if (used + bound > cap) return { ok: false, why: 'free_cap', used, cap, settled: l.free?.day === dayOf(now) ? whole(l.free.micro) : 0 };
       }
       const micro = o.free ? 0 : bound;
       if (micro > l.bal) return { ok: false, why: 'no_credit', bal: l.bal, need: micro };
       const id = o.id || `h${now.toString(36)}${Math.random().toString(36).slice(2, 8)}`;
       l.bal -= micro;
-      l.holds[id] = { micro, at: now, key: o.key, ...(cap > 0 ? { fb: bound } : {}) };
+      const life = Math.min(whole(o.life), STREAM_HOLD_MS);
+      l.holds[id] = {
+        micro,
+        at: now,
+        key: o.key,
+        ...(cap > 0 ? { fb: bound } : {}),
+        ...(life > 0 ? { life } : {}),
+        ...(o.spend ? { spend: 1 as const, ...(typeof o.model === 'string' ? { m: o.model } : {}) } : {}),
+      };
       return { ok: true, hold: id, bal: l.bal };
+    }
+
+    /* The network is streaming an answer, so from here the hold is what that answer may cost: it stands as long as a
+       stream can run, and it is spent if nobody settles it. Before this, a request nothing came back for gets its hold back. */
+    case 'keep': {
+      const h = l.holds[String(o.hold)];
+      if (!h) return { ok: false, why: 'no_hold' };
+      h.life = STREAM_HOLD_MS;
+      h.spend = 1;
+      h.st = 1;
+      if (typeof o.model === 'string') h.m = o.model;
+      return { ok: true };
     }
 
     case 'settle': {
@@ -239,7 +273,8 @@ export function applyOp(l: LedgerRecord, o: LedgerOp, now: number): LedgerReply 
       count(l, o.key, o.tokensIn, o.tokensOut, o.free ? whole(o.micro) : charged, now);
       /* its row in the usage history: nothing charged when free, and worth what it cost either way */
       const row = rowOf(l, o.key, o, o.tokensIn, o.tokensOut, o.free ? 0 : charged, o.micro, o.free ? 1 : 0, now);
-      return { ok: true, bal: l.bal, charged, ...(row ? { row } : {}) };
+      const short = cost - charged;
+      return { ok: true, bal: l.bal, charged, ...(short > 0 ? { short } : {}), ...(row ? { row } : {}) };
     }
 
     case 'log': {
@@ -254,6 +289,18 @@ export function applyOp(l: LedgerRecord, o: LedgerOp, now: number): LedgerReply 
         l.bal += h.micro;
       }
       return { ok: true, bal: l.bal };
+    }
+
+    case 'ask': {
+      const n = l.asks?.day === o.day ? whole(l.asks.n) : 0;
+      if (n >= whole(o.max)) return { ok: false, why: 'asked', n };
+      l.asks = { day: o.day, n: n + 1 };
+      return { ok: true, n: n + 1 };
+    }
+
+    case 'unask': {
+      if (l.asks?.day === o.day && l.asks.n > 0) l.asks.n -= 1;
+      return { ok: true };
     }
 
     case 'addKey': {
@@ -278,13 +325,25 @@ export function applyOp(l: LedgerRecord, o: LedgerOp, now: number): LedgerReply 
 
     case 'expire': {
       let back = 0;
+      const rows: AiRow[] = [];
       for (const [id, h] of Object.entries(l.holds)) {
-        if (now - h.at < HOLD_MS) continue;
+        if (now - h.at < lifeOf(h)) continue;
         delete l.holds[id];
-        l.bal += h.micro;
-        back += h.micro;
+        /* free use nobody settled: the most it may have cost joins the day's spend */
+        if (h.fb !== undefined) {
+          const day = dayOf(now);
+          l.free = { day, micro: (l.free?.day === day ? whole(l.free.micro) : 0) + whole(h.fb) };
+        }
+        if (h.spend) {
+          count(l, h.key, 0, 0, h.micro, now);
+          const row = rowOf(l, h.key, { model: h.m, stream: h.st === 1, note: 'h' }, 0, 0, h.micro, h.micro, 0, now);
+          if (row) rows.push(row);
+        } else {
+          l.bal += h.micro;
+          back += h.micro;
+        }
       }
-      return { ok: true, back, next: Object.values(l.holds).reduce((m, h) => Math.min(m, h.at + HOLD_MS), Infinity) };
+      return { ok: true, back, next: Object.values(l.holds).reduce((m, h) => Math.min(m, h.at + lifeOf(h)), Infinity), ...(rows.length ? { rows } : {}) };
     }
   }
   return { ok: false, why: 'bad_op' };
@@ -340,6 +399,8 @@ async function prune(s: StorageLike, l: LedgerRecord, now: number): Promise<void
  * and with `span`, every row since now - span (a day's figures are drawn from rows, not from day totals).
  */
 async function usageOf(s: StorageLike, l: LedgerRecord, o: Extract<LedgerOp, { op: 'usage' }>, now: number): Promise<LedgerReply> {
+  /* a key reading its own rows must still be a key, whatever an edge cache of KV says */
+  if (o.live && !keyLive(l, String(o.key))) return { ok: false, why: 'key_off' };
   const limit = Math.min(200, Math.max(1, whole(o.limit) || 50));
   const start = `u:${pad(whole(o.from))}`;
   let end = typeof o.before === 'string' && ROW_KEY.test(o.before) ? o.before : 'u:~';
@@ -394,16 +455,21 @@ export class AiLedger {
       }
       reply = applyOp(l, o, now);
       /* the request's row, written with its charge; the oldest go in batches once past what is kept */
-      const row = reply.row as AiRow | undefined;
-      if (row) {
+      const rows = [...(reply.row ? [reply.row as AiRow] : []), ...((reply.rows as AiRow[] | undefined) || [])];
+      if (rows.length) {
         delete reply.row;
-        await s.put(rowKey(row.t), row);
+        delete reply.rows;
+        for (const row of rows) await s.put(rowKey(row.t), row);
         const n = whole(l.rows);
         if (n > USE_KEEP + USE_SLACK || n % 500 === 0) await prune(s, l, now);
       }
       if (o.op !== 'state') await s.put('l', l);
-      /* an outstanding hold always has an alarm to bring it back */
-      if (o.op === 'hold' && reply.ok && !(await s.getAlarm())) await s.setAlarm(now + HOLD_MS + 5_000);
+      /* an outstanding hold always has an alarm to end it, no later than its own life */
+      if (o.op === 'hold' && reply.ok) {
+        const due = now + lifeOf(l.holds[String(reply.hold)]) + 5_000;
+        const armed = await s.getAlarm();
+        if (!armed || armed > due) await s.setAlarm(due);
+      }
     });
     return reply;
   }

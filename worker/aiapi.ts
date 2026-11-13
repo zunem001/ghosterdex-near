@@ -2,9 +2,7 @@
  * Private AI's API: keys a person makes in Explore's AI services, used from
  * any tool that speaks OpenAI's chat completions, answered by NEAR AI or
  * Cocoon (worker/aimodels.ts, by the model a request names) and paid by the
- * tokens used from the account's prepaid credit (owner, 2026-10-14: "i would
- * have preferred users been able to get cocoon api key", then "by tokens
- * used"; 2026-10-20: NEAR AI's models too, at cost).
+ * tokens used from the account's prepaid credit; NEAR AI's models too, at cost.
  *
  *   base     https://ghosterdex.com/api/ai/v1
  *   GET      /models
@@ -12,7 +10,7 @@
  *   GET      /usage              this key's own requests, newest first (?limit, ?model, ?after=<next>)
  *   auth     Authorization: Bearer gdxai_...
  *
- * An agent can think with it (owner, 2026-10-22, over a Hermes agent that could not): tools, the model's calls
+ * An agent can think with it: tools, the model's calls
  * and the tools' answers pass in OpenAI's shape to a model whose network lists tools, a request may carry 2 MB,
  * an answer 32k tokens, and a model's refusal comes back in its own words, a conversation too long for it as
  * context_length_exceeded.
@@ -30,7 +28,7 @@
  * own (per key, and per address for keys that do not exist).
  */
 import { MICRO, ledgerOf, type AiLedgerNs, type AiRow, type Ledger } from './ailedger';
-import { aiModels, chargeMicro, defaultModel, noRefusalModels, noteUpstreamCredit, pickModel, routeFor, type AiModelsEnv } from './aimodels';
+import { aiModels, chargeMicro, defaultModel, noRefusalModels, noteShortfall, noteUpstreamCredit, pickModel, routeFor, type AiModelsEnv } from './aimodels';
 import { shapeFor } from './nearai';
 
 /* the price lives with the models now (worker/aimodels.ts); kept here for older importers */
@@ -55,9 +53,7 @@ export function freeDayMicro(env: Pick<AiApiEnv, 'PRIVATE_AI_FREE_DAY'>): number
 }
 
 export const API_PREFIX = '/api/ai/v1';
-/** The largest request body: an agent's, its long conversation with every tool it carries (owner, 2026-10-22, over
-    a Hermes agent on GLM 5.3 Flash told its "Hi" was too large: 192 KB had been a chat's whole context, and an
-    agent's tools alone pass that). The hold still bounds it at a token a byte. */
+/** The largest request body: an agent's, its long conversation with every tool it carries (an agent's tools alone can pass 192 KB). The hold still bounds it at a token a byte. */
 export const API_BODY_BYTES = 2_000_000;
 export const API_LIMITS = {
   /** answer tokens when the request names none, and the most it may name: room for an agent's tool call or file */
@@ -279,6 +275,22 @@ type Usage = { prompt_tokens?: number; completion_tokens?: number; prompt_tokens
  * reaches the caller only if the caller asked for it too. Settles once: at the
  * end, or with what was seen when the caller hangs up.
  */
+/**
+ * What a request that comes back without the gateway's count pays (the caller hung up before it, or none was sent):
+ * what it may have cost, never a guess below that. Its answer at a token a byte of what was seen, or, from a model that
+ * may think out of sight (one its maker runs), all it may have used. A model that thinks may think past a small
+ * max_tokens, so what was seen of it is not capped there.
+ */
+export function unseenOut(model: { tier?: string; reasons?: boolean }, maxTokens: number, outMax: number, seenBytes: number): number {
+  if (model.tier === 'open') return outMax;
+  return model.reasons ? Math.max(maxTokens, seenBytes) : Math.min(maxTokens, seenBytes);
+}
+
+/** how long a stream may take to start; the answer itself may then run as long as its reader reads */
+export const FIRST_BYTE_MS = 120_000;
+/** a request that is not a stream ends by this, so a hold still standing later is one whose worker was gone: past 300 s of waiting for the model */
+export const ANSWER_HOLD_MS = 6 * 60_000;
+
 export function meteredStream(
   upstream: ReadableStream<Uint8Array>,
   opts: {
@@ -295,6 +307,8 @@ export function meteredStream(
   let usage: Usage | null = null;
   let seen = '';
   let ended = false;
+  /* the gateway has said it is finished, whatever the reader then does */
+  let saidEnd = false;
   const finish = (complete: boolean) => {
     if (ended) return Promise.resolve();
     ended = true;
@@ -311,7 +325,7 @@ export function meteredStream(
         cached: Number.isFinite(cached) && cached > 0 ? cached : 0,
         seenChars: seen.length,
         seenBytes: utf8.encode(seen).length,
-        complete,
+        complete: complete || saidEnd,
       })
       .catch(() => {});
   };
@@ -320,13 +334,17 @@ export function meteredStream(
     const t = raw.trim();
     if (!t.startsWith('data:')) return raw;
     const data = t.slice(5).trim();
+    if (data === '[DONE]') saidEnd = true;
     if (!data || data === '[DONE]') return raw;
     try {
       const j = JSON.parse(data);
       if (j?.usage && typeof j.usage === 'object') usage = j.usage;
+      /* the usage event comes last, with no choices left to answer */
+      if (j?.usage && Array.isArray(j.choices) && j.choices.length === 0) saidEnd = true;
       const d = j?.choices?.[0]?.delta;
       if (typeof d?.content === 'string') seen += d.content;
       if (typeof d?.reasoning_content === 'string') seen += d.reasoning_content;
+      if (typeof d?.reasoning === 'string') seen += d.reasoning;
       /* a call the model makes is answer tokens too: its name and its arguments, as they stream */
       if (Array.isArray(d?.tool_calls)) {
         for (const tc of d.tool_calls) seen += `${typeof tc?.function?.name === 'string' ? tc.function.name : ''}${typeof tc?.function?.arguments === 'string' ? tc.function.arguments : ''}`;
@@ -432,6 +450,8 @@ export interface AiApiCtx {
   waitUntil?: (p: Promise<unknown>) => void;
   fetcher?: typeof fetch;
   ledgerFor?: (uid: string) => Ledger | null;
+  /** a test's own wait for a stream to start */
+  firstByteMs?: number;
   /** a message to the owner (index.ts ownerTelegram): a network out of the house's credit */
   alert?: (text: string) => Promise<unknown>;
   /** a paired agent (agents.ts agentCard): its key never names a model whose refusals were taken out */
@@ -473,7 +493,9 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
       limit: Math.min(100, Math.max(1, Math.floor(Number(q.get('limit')) || 50))),
       ...(q.get('after') ? { before: String(q.get('after')).slice(0, 40) } : {}),
       ...(q.get('model') ? { model: String(q.get('model')).slice(0, 120) } : {}),
+      live: true,
     });
+    if (r.why === 'key_off') return oaiError(401, 'That API key was revoked.', 'invalid_api_key');
     if (!r.ok) return oaiError(503, 'Billing is not available right now.', 'unavailable', 'server_error');
     const data = ((r.rows || []) as Array<AiRow & { id: string }>).map((x) => ({
       id: x.id,
@@ -542,7 +564,9 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
   /* the owner's keys are free (marked when the owner made them), still counted, and capped by the day */
   const free = idx.owner === true;
   const inMax = inputBound(clean.texts);
-  const hold = await ledger({ op: 'hold', micro: chargeMicro(model, inMax, clean.maxTokens), key: idx.id, free, ...(free ? { freeCap: freeDayMicro(env) } : {}) });
+  /* a model that thinks before it answers may count its thinking past a small max_tokens */
+  const outMax = model.reasons ? Math.max(clean.maxTokens, API_LIMITS.answerDefault) : clean.maxTokens;
+  const hold = await ledger({ op: 'hold', micro: chargeMicro(model, inMax, outMax), key: idx.id, free, ...(free ? { freeCap: freeDayMicro(env) } : {}), ...(clean.stream ? {} : { life: ANSWER_HOLD_MS, spend: true, model: model.id }) });
   if (!hold.ok) {
     if (hold.why === 'key_off') return oaiError(401, 'That API key was revoked.', 'invalid_api_key');
     if (hold.why === 'no_credit') {
@@ -568,25 +592,35 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
       ms: Date.now() - t0,
       ...(clean.stream ? { stream: true } : {}),
       ...(note ? { note } : {}),
-    }).then(() => undefined);
+    }).then(async (x) => {
+      if (Number(x.short) > 0) await noteShortfall(env, ctx.alert);
+    });
   const release = () => ledger({ op: 'release', hold: holdId }).then(() => undefined);
 
   /* only the settings this model takes (worker/nearai.ts shapeFor) */
   const upBody = shapeFor(model, clean.stream ? { ...clean.up, stream: true, stream_options: { include_usage: true } } : { ...clean.up, stream: false });
   const t0 = Date.now();
+  /* carried past a caller who hangs up: the network is working, so the request is answered and settled */
+  const answer = async (): Promise<Response> => {
   let r: Response;
+  /* a signal would also end the answer once it runs, so a stream's only covers the wait for it to start */
+  const start = new AbortController();
+  const startTimer = clean.stream ? setTimeout(() => start.abort(Object.assign(new Error('timed out'), { name: 'TimeoutError' })), ctx.firstByteMs ?? FIRST_BYTE_MS) : null;
   try {
     r = await (ctx.fetcher || fetch)(`${route.base}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${route.key}`, 'Content-Type': 'application/json', 'User-Agent': 'GhosterDex AI API' },
       body: JSON.stringify(upBody),
-      signal: clean.stream ? undefined : AbortSignal.timeout(300_000),
+      signal: clean.stream ? start.signal : AbortSignal.timeout(300_000),
       /* the key goes to the gateway named, never on to wherever a redirect points */
       redirect: 'manual',
     });
+    if (startTimer) clearTimeout(startTimer);
   } catch (e) {
-    await release();
+    if (startTimer) clearTimeout(startTimer);
     const slow = (e as { name?: string })?.name === 'TimeoutError';
+    /* it read the request before it ran out of time, so the input is counted, as a bound, and no answer is; a stream that never started gave nothing */
+    await (slow && !clean.stream ? settle(inMax, 0, 0, 'u') : release());
     console.log('[aiapi] gateway', slow ? 'timeout' : 'unreachable', Date.now() - t0, 'ms');
     return oaiError(slow ? 504 : 502, slow ? 'The model took too long to answer.' : 'The model could not be reached.', slow ? 'timeout' : 'upstream_error', 'server_error');
   }
@@ -597,8 +631,7 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
     if (r.status === 402) await noteUpstreamCredit(env, model, ctx.alert);
     if (r.status === 429) return oaiError(429, 'The model is busy. Try again shortly.', 'rate_limit_exceeded', 'rate_limit_error');
     /* The model's own reason, so the caller can act on it. A conversation past what the model reads is
-       context_length_exceeded, the code agent frameworks shorten a conversation on (an agent only "compressed"
-       against a refusal it could not read, 2026-10-22). */
+       context_length_exceeded, the code agent frameworks shorten a conversation on . */
     if (r.status === 400 || r.status === 413 || r.status === 422) {
       const said = await upstreamWords(r);
       if (r.status === 413 || TOO_LONG.test(said)) {
@@ -610,19 +643,23 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
     return oaiError(r.status === 404 ? 503 : 502, 'The model is unavailable right now. Try again later.', 'upstream_error', 'server_error');
   }
 
-  /* What a request that comes back without the gateway's count pays (the caller hung up before it, or none was
-     sent): what it may have cost, never a guess below that. All of its input, which the model read in full before
-     answering, and its answer at a token a byte of what was seen, or, from a model that may think out of sight
-     (one its maker runs), the whole answer allowed. The hold already covers both. */
-  const unseenOut = (seenBytes: number) => (model.tier === 'open' ? clean.maxTokens : Math.min(clean.maxTokens, seenBytes));
+  /* without the gateway's count, all of its input, which the model read in full before answering, and unseenOut */
+  const unseen = (seenBytes: number) => unseenOut(model, clean.maxTokens, outMax, seenBytes);
 
   if (clean.stream) {
+    const kept = await ledger({ op: 'keep', hold: holdId, model: model.id });
+    if (!kept.ok) {
+      await r.body.cancel().catch(() => {});
+      await release();
+      return oaiError(503, 'Billing is not available right now.', 'unavailable', 'server_error');
+    }
     const body = meteredStream(r.body, {
       wantUsage: clean.wantUsage,
       waitUntil: ctx.waitUntil,
       onEnd: async (u) => {
         const tokensIn = u.tokensIn ?? inMax;
-        const tokensOut = u.outCounted ? u.tokensOut : unseenOut(u.seenBytes);
+        /* a count is the whole answer's only once the stream has ended */
+        const tokensOut = u.outCounted && u.complete ? u.tokensOut : Math.max(u.outCounted ? u.tokensOut : 0, unseen(u.seenBytes));
         console.log('[aiapi] stream', u.complete ? 'ended' : 'hung up', Date.now() - t0, 'ms', u.tokensIn ?? `${inMax} uncounted`, '/', u.outCounted ? u.tokensOut : `${tokensOut} uncounted`, 'tokens');
         await settle(tokensIn, tokensOut, u.cached, !u.complete ? 'h' : u.tokensIn == null || !u.outCounted ? 'u' : undefined);
       },
@@ -642,9 +679,13 @@ export async function handleAiApi(ctx: AiApiCtx): Promise<Response | null> {
   const pin = Number(j?.usage?.prompt_tokens);
   const pout = j?.usage?.completion_tokens == null ? NaN : Number(j.usage.completion_tokens);
   const tokensIn = Number.isFinite(pin) && pin > 0 ? pin : inMax;
-  const tokensOut = Number.isFinite(pout) && pout >= 0 ? pout : unseenOut(utf8.encode(answer).length);
+  const tokensOut = Number.isFinite(pout) && pout >= 0 ? pout : unseen(utf8.encode(answer).length);
   const cached = Number(j?.usage?.prompt_tokens_details?.cached_tokens);
   await settle(tokensIn, tokensOut, Number.isFinite(cached) && cached > 0 ? cached : 0, Number.isFinite(pin) && pin > 0 && Number.isFinite(pout) && pout >= 0 ? undefined : 'u');
   console.log('[aiapi] answered', Date.now() - t0, 'ms', tokensIn, '/', tokensOut, 'tokens');
   return new Response(JSON.stringify(j), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS } });
+  };
+  const job = answer();
+  ctx.waitUntil?.(job);
+  return job;
 }

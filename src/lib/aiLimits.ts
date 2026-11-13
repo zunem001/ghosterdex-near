@@ -20,15 +20,14 @@ export const AI_LIMITS = {
 };
 
 /**
- * What a top-up of credit may be, in dollars (worker /api/ai/credit/order), from $1 (owner, 2026-10-20: "the
- * deposit should start from a dollar"). No bridge sits under either rail: a vault coin swaps inside the
+ * What a top-up of credit may be, in dollars (worker /api/ai/credit/order), from $1. No bridge sits under either rail: a vault coin swaps inside the
  * confidential balance (1Click quoted $1 of Tether for about $1.02 that day) and a Gram wallet token pays the
  * box directly.
  */
 export const AI_TOPUPS = [1, 5, 10, 25];
 
 /**
- * Any amount besides (owner, 2026-10-21: "users should be able to put any amount they like"): dollars in whole
+ * Any amount besides: dollars in whole
  * cents, from a dollar to this much in one top-up, a cap that turns a typo of an extra zero or two into a refusal
  * rather than a payment. The presets above are the quick picks; the worker takes any amount this allows.
  */

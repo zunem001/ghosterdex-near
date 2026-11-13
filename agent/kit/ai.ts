@@ -1,9 +1,7 @@
 /**
- * Private AI, for the agent itself (owner, 2026-10-21: "i hope the ai agents
- * using the agentic wallets can also use the new private ai and also api,
- * which means they can also fund themselves with the api from ghosterdex").
+ * Private AI, for the agent itself: it can use the chat and the API, and pay for them with its own money.
  *
- * GhosterDex's models, NEAR AI's and Cocoon's, asked from the kit, or from
+ * GhosterDex's models, asked from the kit, or from
  * anything that speaks OpenAI's chat completions with an API key this account
  * makes, and paid by the tokens used from credit this account buys with its
  * own money. Credit is a purchase like Stars or a gift: the owner's Purchases
@@ -23,7 +21,9 @@
  */
 import { Address, beginCell, type Cell } from '@ton/core';
 import { aiTopupOk, AI_CREDIT_MAX, AI_CREDIT_MIN } from '../../src/lib/aiLimits';
+import { looksLikeSecret } from '../../src/lib/secretGuard';
 import { fromRaw } from './amounts';
+import { mostToPay } from './intent';
 import { ApiError } from './client';
 import { KitError, normSymbol, type Balance, type Kit } from './kit';
 
@@ -181,6 +181,7 @@ export async function aiModelList(k: Kit, a: { search?: unknown; private_only?: 
 export async function aiAsk(k: Kit, a: { question?: unknown; model?: unknown }) {
   const question = String(a.question ?? '').trim();
   if (!question) throw new KitError('Ask a question.');
+  if (looksLikeSecret(question)) throw new KitError('That looks like a recovery phrase or a private key, so it was not sent.', { code: 'secret' });
   const model = String(a.model ?? '').trim();
   const r = await k.c
     .call<{ reply: string; model: string; cut: boolean; balance?: number }>('/api/ai/chat', {
@@ -206,8 +207,9 @@ export async function aiNewKey(k: Kit, a: { name?: unknown }) {
     throw aiExplain(k, e);
   });
   const acct = await aiAccount(k).catch(() => null);
-  const base = acct?.base || `${k.ks.server.replace(/^http:/, 'https:')}/api/ai/v1`;
-  const model = acct?.model;
+  /* both go into a snippet someone may run, so they must be what they say they are */
+  const base = /^https:\/\/[\w.-]+(:\d+)?(\/[\w./-]*)?$/.test(String(acct?.base)) ? String(acct?.base) : `${k.ks.server.replace(/^http:/, 'https:')}/api/ai/v1`;
+  const model = /^[\w.:/@+-]{1,120}$/.test(String(acct?.model)) ? acct?.model : undefined;
   return {
     key: r.key,
     id: r.id,
@@ -485,6 +487,8 @@ export async function aiAddCredit(k: Kit, a: { usd?: unknown; pay_with?: unknown
     if (!order?.orderId || !order.assetId || !order.amountRaw || !order.destAssetId) throw new KitError('The order could not be placed. Nothing was charged.');
     if (order.assetId !== row.assetId) throw new KitError(`The order came back priced in another coin than ${row.symbol}. Nothing was charged.`);
     const need = BigInt(order.amountRaw);
+    const most = mostToPay(usdAmount, row.price, row.decimals);
+    if (most === null || need > most) throw new KitError(`That order asks ${fromRaw(need, row.decimals)} ${row.symbol} for $${usdAmount} of credit. Nothing was charged.`, { code: 'price_off', hint: 'Try again in a moment.' });
     if (BigInt(row.raw) < need) {
       throw new KitError(`That takes ${fromRaw(need, row.decimals)} ${row.symbol}, and the vault holds ${fromRaw(row.raw, row.decimals)} on ${row.blockchain}. Nothing was charged.`, {
         code: 'insufficient',
@@ -498,7 +502,7 @@ export async function aiAddCredit(k: Kit, a: { usd?: unknown; pay_with?: unknown
     );
     if (!q?.depositAddress || !q.signPayload) throw new KitError('The payment could not be prepared. Nothing was charged.');
     await bindFirst(k, order.orderId, q.depositAddress);
-    await k.execute(q, 'boxpay');
+    await k.execute(q, 'boxpay', { assetId: order.assetId, raw: need });
     orderId = order.orderId;
     routeId = q.depositAddress;
     paid = `${fromRaw(need, row.decimals)} ${row.symbol}`;
@@ -509,6 +513,10 @@ export async function aiAddCredit(k: Kit, a: { usd?: unknown; pay_with?: unknown
     const order = await placed(cocoon ? { payFrom: 'gram', payMaster: master } : { payFrom: 'gram' });
     if (!order?.orderId || order.rail !== 'chain' || !order.amountRaw || !order.routeId) throw new KitError('The order could not be placed. Nothing was charged.');
     const need = BigInt(order.amountRaw);
+    if (!cocoon) {
+      const most = mostToPay(usdAmount, Number(snap?.gram?.price) || 0, 9);
+      if (most === null || need > most) throw new KitError(`That order asks ${fromRaw(need, 9)} GRAM for $${usdAmount} of credit. Nothing was charged.`, { code: 'price_off', hint: 'Try again in a moment.' });
+    }
     /* the key may sign, and the coin and the network's fee are there, before anything is counted or signed */
     const ctl = await k.gramControl().catch(() => null);
     if (ctl?.signatureAllowed === false) {

@@ -1,9 +1,7 @@
 /**
  * Private AI, in Explore's AI services (src/screens/PrivateAi.tsx): a chat
  * answered by NEAR AI or by Cocoon, Telegram's confidential inference network,
- * through TON Console (owner, 2026-10-14: "can we build an ai inference with
- * cocoon on the explore ai services section"; 2026-10-20: "add near ai to the
- * private ai aswell"). The person picks the model (worker/aimodels.ts): NEAR
+ * through TON Console. The person picks the model (worker/aimodels.ts): NEAR
  * AI's in secure hardware, its partners', the ones it forwards to their makers
  * (labelled Not private), and Cocoon's.
  *
@@ -31,8 +29,7 @@
  *  - what it costs: the tokens used, from the account's prepaid credit
  *    (worker/ailedger.ts), the same credit its API keys spend (worker/aiapi.ts).
  *    The owner's use is free and still counted. The app's chat with one model,
- *    PRIVATE_AI_FREE_CHAT (GLM 5.3 Flash), is free for every person (owner,
- *    2026-10-22), within a day's allowance an account and a day's budget for
+ *    PRIVATE_AI_FREE_CHAT (GLM 5.3 Flash), is free for every person, within a day's allowance an account and a day's budget for
  *    everyone together; agents and API keys pay for it as before.
  *
  * The account's side of the API lives here too: its credit and price
@@ -42,9 +39,9 @@
  */
 import { looksLikeSecret } from '../src/lib/secretGuard';
 import { AI_LIMITS, newestTurns, type AiTurn } from '../src/lib/aiLimits';
-import { MICRO, cleanPrice, ledgerOf, type AiDay, type AiKey, type AiLedgerNs, type AiRow, type AiUse, type Ledger } from './ailedger';
+import { FREE_HOLD_MS, MICRO, cleanPrice, ledgerOf, type AiDay, type AiKey, type AiLedgerNs, type AiRow, type AiUse, type Ledger } from './ailedger';
 import { API_PREFIX, inputBound, newKey } from './aiapi';
-import { aiModels, aiPrice, anyReady, chargeMicro, defaultModel, forgetPrice, noRefusalModels, noteUpstreamCredit, pickModel, publicModel, routeFor, type AiModel, type AiModelsEnv } from './aimodels';
+import { aiModels, aiPrice, anyReady, chargeMicro, defaultModel, forgetPrice, noRefusalModels, noteShortfall, noteUpstreamCredit, pickModel, publicModel, routeFor, type AiModel, type AiModelsEnv } from './aimodels';
 import { nearMargin, shapeFor } from './nearai';
 
 export { AI_LIMITS, type AiTurn };
@@ -171,7 +168,9 @@ export function systemFor(m: Pick<AiModel, 'net' | 'tier' | 'name' | 'maker'>): 
 }
 
 /** ms: how long the network took; counted: it said how many tokens both ways (else the bounds were charged) */
-export type AskResult = { reply: string; model: string; tokensIn: number; tokensOut: number; cached: number; cut: boolean; ms: number; counted: boolean } | AiRefusal;
+export type AskSpent = { tokensIn: number; tokensOut: number; cached: number; ms: number; counted: boolean };
+/** A refusal carries `spent` when the network did the work anyway: the question cost what it cost, and is counted. */
+export type AskResult = ({ reply: string; model: string; cut: boolean } & AskSpent) | (AiRefusal & { spent?: AskSpent });
 
 /** The longest answer the chat asks of a model: room to think for one that always thinks first. */
 export const answerCap = (m: Pick<AiModel, 'reasons' | 'think'>) => (m.reasons && !m.think ? AI_LIMITS.answerThinking : AI_LIMITS.answer);
@@ -212,7 +211,9 @@ export async function askModel(env: PrivateAiEnv, turns: AiTurn[], model: AiMode
   } catch (e) {
     const slow = (e as { name?: string })?.name === 'TimeoutError' || (e as { name?: string })?.name === 'AbortError';
     console.log('[privateai] gateway', slow ? 'timeout' : 'unreachable', Date.now() - t0, 'ms');
-    return refusal(slow ? 'slow' : 'unavailable');
+    if (!slow) return refusal('unavailable');
+    /* it read the question before it ran out of time, so the input is counted, as a bound, and no answer is */
+    return { ...refusal('slow'), spent: { tokensIn: inputBound([system, ...turns.map((t) => t.content)]), tokensOut: 0, cached: 0, ms: Date.now() - t0, counted: false } };
   }
   if (!r.ok) {
     /* the status says whose problem it is: 401/403 the key, 402 the house's credit there, 404 the address */
@@ -228,9 +229,6 @@ export async function askModel(env: PrivateAiEnv, turns: AiTurn[], model: AiMode
   const choice = j?.choices?.[0];
   const reply = stripThinking(typeof choice?.message?.content === 'string' ? choice.message.content : '');
   console.log('[privateai] gateway 200', Date.now() - t0, 'ms', reply ? 'answered' : 'empty');
-  if (!reply) return refusal('no_answer');
-  if (looksLikeSecret(reply)) return refusal('withheld');
-  const cut = choice?.finish_reason === 'length';
   /* The network's own count where it gives one. Without it, what the question may have cost, never a guess below
      that: the bound of what was sent (a token is at least a byte), and the answer with its visible thinking at a
      token a byte, or the whole answer allowed from a model that may think out of sight (one its maker runs). */
@@ -240,17 +238,21 @@ export async function askModel(env: PrivateAiEnv, turns: AiTurn[], model: AiMode
   const said = utf8.encode(String(choice?.message?.content || '') + String(choice?.message?.reasoning_content || '')).length;
   const sentOk = Number.isFinite(sent) && sent > 0;
   const gotOk = Number.isFinite(got) && got > 0;
-  return {
-    reply: cut ? `${reply} …` : reply,
-    model: model.id,
+  const spent: AskSpent = {
     tokensIn: sentOk ? sent : inputBound([system, ...turns.map((t) => t.content)]),
     tokensOut: gotOk ? got : model.tier === 'open' ? answerCap(model) : Math.min(answerCap(model), said),
     cached: Number.isFinite(cached) && cached > 0 ? cached : 0,
-    cut,
     ms: Date.now() - t0,
     counted: sentOk && gotOk,
   };
+  /* an error page or nothing at all is no work the network says it did */
+  if (!reply) return Array.isArray(j?.choices) || (j?.usage && typeof j.usage === 'object') ? { ...refusal('no_answer'), spent } : refusal('no_answer');
+  if (looksLikeSecret(reply)) return { ...refusal('withheld'), spent };
+  const cut = choice?.finish_reason === 'length';
+  return { reply: cut ? `${reply} …` : reply, model: model.id, cut, ...spent };
 }
+
+const ASK_HOLD_MS = 3 * 60_000;
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -267,8 +269,7 @@ const usd = (micro: unknown) => Math.round(Number(micro || 0)) / MICRO;
 /* ------------------------------------------------------------------ the free chat */
 
 /**
- * The app's chat with one model is free for every person (owner, 2026-10-22: "make the glm 5.3 model free for
- * everyone in the app so they can ask questions in the app, but every other thing remains the same"). No credit
+ * The app's chat with one model is free for every person. No credit
  * is held or spent, and nothing is written to the person's ledger, so their credit and what it went to read as
  * before. Two bounds keep a script from spending the house's NEAR AI credit without end: FREE_CHAT_PER_DAY
  * questions an account a UTC day, and the day's free spend for everyone together, held in the house's own ledger
@@ -294,7 +295,7 @@ export function freeChatDayMicro(env: Pick<PrivateAiEnv, 'PRIVATE_AI_FREE_CHAT_D
 }
 
 /**
- * What the app shows of the free chat (owner, 2026-10-22: "add the free label next to glm"): its model and how many
+ * What the app shows of the free chat: its model and how many
  * free questions this account has left today, so the label is only ever shown where a question would be free. The
  * owner's are counted on the owner's own day; an agent, or anyone who cannot be told apart from one, gets none; a
  * spent house budget leaves none for anyone until midnight UTC.
@@ -318,9 +319,10 @@ type FreeHold = { release: () => Promise<unknown>; settle: (micro: number, token
 /**
  * A question's place in the free chat: held against the house's day budget, its count kept per account. Null when
  * the question is not free (another model, an agent, the account's allowance spent, the house's budget spent), and
- * then it is paid as before. A failed answer releases the hold and counts nothing against the person.
+ * then it is paid as before; 'busy' when only questions in flight fill the budget. A question the network did no work
+ * for releases the hold and counts nothing against the person.
  */
-async function freeChatHold(ctx: PrivateAiCtx, ledgerFor: (uid: string) => Ledger | null, model: AiModel, bound: number, day: string): Promise<FreeHold | null> {
+async function freeChatHold(ctx: PrivateAiCtx, ledgerFor: (uid: string) => Ledger | null, model: AiModel, bound: number, day: string): Promise<FreeHold | 'busy' | null> {
   const { env, uid } = ctx;
   const id = freeChatModel(env);
   if (!id || model.id !== id) return null;
@@ -331,9 +333,17 @@ async function freeChatHold(ctx: PrivateAiCtx, ledgerFor: (uid: string) => Ledge
   if (n >= FREE_CHAT_PER_DAY) return null;
   const cap = freeChatDayMicro(env);
   const house = ledgerFor(FREE_CHAT_HOUSE);
-  if (!house || cap <= 0) return null;
-  const held = await house({ op: 'hold', micro: bound, key: 'chat', free: true, freeCap: cap });
+  const mine = ledgerFor(uid);
+  if (!house || !mine || cap <= 0) return null;
+  /* counted in the account's own ledger, one at a time, so questions asked together each count */
+  const asked = await mine({ op: 'ask', day, max: FREE_CHAT_PER_DAY });
+  /* only a day's questions used up moves this person to paying; a ledger that could not answer is no reason to charge them */
+  if (!asked.ok) return asked.why === 'asked' ? null : 'busy';
+  const held = await house({ op: 'hold', micro: bound, key: 'chat', free: true, freeCap: cap, life: FREE_HOLD_MS });
   if (!held.ok) {
+    await mine({ op: 'unask', day });
+    if (held.why !== 'free_cap') return 'busy';
+    if (held.why === 'free_cap' && Number(held.settled) + bound <= cap) return 'busy';
     /* the day's budget is spent: the Free label comes off for the rest of the day (freeChatView), and the owner
        hears it once a day, as the free chat then costs its askers credit */
     if (held.why === 'free_cap') await env.STATE.put(`aifree:spent:${day}`, '1', { expirationTtl: 2 * 86400 }).catch(() => {});
@@ -347,10 +357,13 @@ async function freeChatHold(ctx: PrivateAiCtx, ledgerFor: (uid: string) => Ledge
   }
   const hold = String(held.hold);
   return {
-    release: () => house({ op: 'release', hold }),
+    release: async () => {
+      await house({ op: 'release', hold });
+      await mine({ op: 'unask', day });
+    },
     settle: async (micro, tokensIn, tokensOut) => {
       await house({ op: 'settle', hold, micro, key: 'chat', tokensIn, tokensOut, free: true });
-      await env.STATE.put(key, JSON.stringify({ n: n + 1 }), { expirationTtl: 3 * 86400 }).catch(() => {});
+      await env.STATE.put(key, JSON.stringify({ n: Math.max(n + 1, Number(asked.n) || 0) }), { expirationTtl: 3 * 86400 }).catch(() => {});
     },
   };
 }
@@ -582,6 +595,8 @@ export interface PrivateAiCtx {
   alert?: (text: string) => Promise<unknown>;
   /** a paired agent (agents.ts agentCard): it pays for its questions, the free chat is for people */
   isAgent?: (uid: string) => Promise<boolean>;
+  /** keeps a question going when its asker closes the app: the network is working, so it is answered and counted */
+  waitUntil?: (p: Promise<unknown>) => void;
 }
 
 const ROUTES = new Set(['/api/ai/chat', '/api/ai/account', '/api/ai/usage', '/api/ai/keys', '/api/ai/keys/revoke', '/api/ai/price', '/api/ai/grant']);
@@ -720,33 +735,45 @@ export async function handlePrivateAi(ctx: PrivateAiCtx): Promise<Response | nul
   if (used && used.n >= AI_LIMITS.perDay) return refuse(refusal('daily'));
   const bound = chargeMicro(model, inputBound([systemFor(model), ...clean.turns.map((t) => t.content)]), answerCap(model));
   /* what an answer's row in the usage history says beyond its charge */
-  const facts = (got: Extract<AskResult, { reply: string }>) => ({ model: model.id, cached: got.cached, ms: got.ms, ...(got.counted ? {} : { note: 'u' as const }) });
-  /* the free chat (freeChatHold): the house holds and pays it; the person's credit is not touched */
-  const gift = free ? null : await freeChatHold(ctx, ledgerFor, model, bound, day);
-  if (gift) {
+  const facts = (got: AskSpent) => ({ model: model.id, cached: got.cached, ms: got.ms, ...(got.counted ? {} : { note: 'u' as const }) });
+  const answer = async (): Promise<Response> => {
+    /* the free chat (freeChatHold): the house holds and pays it; the person's credit is not touched */
+    const gift = free ? null : await freeChatHold(ctx, ledgerFor, model, bound, day);
+    if (gift === 'busy') return refuse(refusal('busy'));
+    if (gift) {
+      const got = await askModel(env, clean.turns, model, ctx.fetcher);
+      const spent = 'error' in got ? got.spent : got;
+      if (spent) {
+        const micro = chargeMicro(model, spent.tokensIn, spent.tokensOut, spent.cached);
+        await gift.settle(micro, spent.tokensIn, spent.tokensOut);
+        /* the asker's own history shows it, worth what it cost and nothing charged */
+        await ledger({ op: 'log', key: 'chat', micro, tokensIn: spent.tokensIn, tokensOut: spent.tokensOut, ...facts(spent) });
+      } else await gift.release();
+      if ('error' in got) {
+        if (got.upstream === 402) await noteUpstreamCredit(env, model, ctx.alert);
+        return refuse(got);
+      }
+      return json({ reply: got.reply, model: got.model, cut: got.cut, free: true });
+    }
+    /* the question ends by ASK_MS, so a hold still standing past this is one whose worker was gone: what it may have cost */
+    const hold = await ledger({ op: 'hold', micro: bound, key: 'chat', free, life: ASK_HOLD_MS, spend: true, model: model.id });
+    if (!hold.ok) return refuse(refusal(hold.why === 'no_credit' ? 'no_credit' : 'billing'));
+    const holdId = String(hold.hold);
     const got = await askModel(env, clean.turns, model, ctx.fetcher);
+    const spent = 'error' in got ? got.spent : got;
+    /* a question the network did no work for costs nothing; one it did work for costs what it cost, answered or not */
+    const settled = spent
+      ? await ledger({ op: 'settle', hold: holdId, micro: chargeMicro(model, spent.tokensIn, spent.tokensOut, spent.cached), key: 'chat', tokensIn: spent.tokensIn, tokensOut: spent.tokensOut, free, ...facts(spent) })
+      : await ledger({ op: 'release', hold: holdId });
+    if (spent && Number(settled.short) > 0) await noteShortfall(env, ctx.alert);
+    if (used && spent) await env.STATE.put(useKey, JSON.stringify({ n: used.n + 1, in: used.in + spent.tokensIn, out: used.out + spent.tokensOut }), { expirationTtl: 45 * 86400 }).catch(() => {});
     if ('error' in got) {
-      await gift.release();
       if (got.upstream === 402) await noteUpstreamCredit(env, model, ctx.alert);
       return refuse(got);
     }
-    const micro = chargeMicro(model, got.tokensIn, got.tokensOut, got.cached);
-    await gift.settle(micro, got.tokensIn, got.tokensOut);
-    /* the asker's own history shows it, worth what it cost and nothing charged */
-    await ledger({ op: 'log', key: 'chat', micro, tokensIn: got.tokensIn, tokensOut: got.tokensOut, ...facts(got) });
-    return json({ reply: got.reply, model: got.model, cut: got.cut, free: true });
-  }
-  const hold = await ledger({ op: 'hold', micro: bound, key: 'chat', free });
-  if (!hold.ok) return refuse(refusal(hold.why === 'no_credit' ? 'no_credit' : 'billing'));
-  const holdId = String(hold.hold);
-  const got = await askModel(env, clean.turns, model, ctx.fetcher);
-  if ('error' in got) {
-    /* nothing answered, nothing charged: a refusal, an outage and a withheld answer cost the person nothing */
-    await ledger({ op: 'release', hold: holdId });
-    if (got.upstream === 402) await noteUpstreamCredit(env, model, ctx.alert);
-    return refuse(got);
-  }
-  const settled = await ledger({ op: 'settle', hold: holdId, micro: chargeMicro(model, got.tokensIn, got.tokensOut, got.cached), key: 'chat', tokensIn: got.tokensIn, tokensOut: got.tokensOut, free, ...facts(got) });
-  if (used) await env.STATE.put(useKey, JSON.stringify({ n: used.n + 1, in: used.in + got.tokensIn, out: used.out + got.tokensOut }), { expirationTtl: 45 * 86400 }).catch(() => {});
-  return json({ reply: got.reply, model: got.model, cut: got.cut, ...(settled.ok && !free ? { balance: usd(settled.bal) } : {}) });
+    return json({ reply: got.reply, model: got.model, cut: got.cut, ...(settled.ok && !free ? { balance: usd(settled.bal) } : {}) });
+  };
+  const job = answer();
+  ctx.waitUntil?.(job);
+  return job;
 }

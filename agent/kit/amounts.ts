@@ -5,7 +5,9 @@
  */
 
 export function toRaw(amount: string | number, decimals: number): bigint {
-  const s = String(amount).trim().replace(/_/g, '').replace(/,/g, '');
+  const s = String(amount).trim().replace(/_/g, '');
+  /* a comma is a thousands mark in one country and a decimal point in another, and those amounts differ a thousandfold */
+  if (s.includes(',')) throw new Error(`"${amount}" has a comma. Write it with a dot and no separators, like 1250.5.`);
   if (!/^\d*\.?\d*$/.test(s) || s === '' || s === '.') throw new Error(`"${amount}" is not an amount.`);
   const [whole, frac = ''] = s.split('.');
   if (frac.length > decimals) {

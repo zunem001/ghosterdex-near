@@ -73,6 +73,7 @@ The hackathon counts code written since its announcement on 2026-10-19. **[The d
 | Nov 3 | Two NEAR AI models with their refusals removed, on a person's API key only, under a warning | `worker/nearai.ts` |
 | Nov 3 | AI scan: a private NEAR AI model checks a site or transaction in the Android browser, paid from credit | Closed source. [See the map](docs/near-map.md#the-browsers-ai-scan) |
 | Nov 4 | An attestation check for anyone to run, with these tests and demos | `demo/`, `test/` |
+| Nov 5 | Kit 1.9.1, and how Private AI counts usage | `agent/kit/`, `worker/ailedger.ts`, `worker/privateai.ts` |
 
 ## What it is built on
 
@@ -117,7 +118,7 @@ GhosterDex's app and worker are closed source, so this is a public extract:
 - `worker-excerpts/`: functions copied word for word from the closed worker, each marked as an excerpt.
 - `demo/`, `test/`: everything in the tables above.
 
-The last commit is new. Every commit before it replays the private repository's commits for these paths, keeping their original dates, with new, shorter messages. A few comments read differently here in every version: long dashes became commas, a local file path is gone, and a test note is shorter.
+The last commit is new. Every commit before it replays the private repository's commits for these paths, keeping their original dates, with new, shorter messages. A few comments read differently here in every version: long dashes became commas, a local file path is gone, and some are shorter. The code is the same.
 
 The wallet's browser code is public where it is served: for example [fund-pro.js](https://ghosterdex.com/fund-pro.js), which funds perps.
 

@@ -1,18 +1,8 @@
 /**
  * Which wallet a browser-held trading key belongs to.
  *
- * ## The bug this exists to end
- *
- * The browser master key lived at the fixed localStorage path
- * `ghoster.perps.master`, with no wallet anywhere in it. One browser, one key.
- * So a second wallet connecting in the same browser or Telegram webview read
- * the FIRST wallet's key and could sign orders on its Hyperliquid account:
- * not merely see the positions, place and close them. Reported 2026-08-06 with
- * a recording of a $0.00 vault sitting above $30.38 of somebody else's perps.
- *
- * The Android app hit the same class of bug and fixed it by scoping per wallet
- * slot (TradePlugin.kt, addrKey()). This is that fix for the web layer, plus
- * the part Android did not need.
+ * Every trading key this browser holds is stored under the wallet it belongs to, the way the phone scopes per wallet
+ * slot (TradePlugin.kt, addrKey()), so one browser can serve several wallets and each reads only its own.
  *
  * ## Why the scope is the RAW address
  *
@@ -25,10 +15,8 @@
  *
  * Both sources below are wallets the app has actually established: a live
  * TON Connect account, or the prefix of a session token the server minted
- * against a ton_proof. Neither is a hint. A provisional or remembered "last
- * wallet" would reopen the hole it closes, because signing happens on the
- * strength of the local key alone: sign before the wallet is settled and the
- * new wallet is once again trading on the old one's account.
+ * against a ton_proof. Neither is a hint, because signing happens on the
+ * strength of the local key alone, so nothing signs before the wallet is settled.
  *
  * With no proven wallet there is no scope, and with no scope there is no key.
  * The terminal briefly says it has no trading account and corrects itself the
@@ -55,7 +43,10 @@ function normalise(addr: string | null | undefined): string | null {
  */
 function fromSessionToken(): string | null {
   try {
-    return normalise((localStorage.getItem('ghoster.tonauth') || '').split('.')[0]);
+    const [address, exp] = (localStorage.getItem('ghoster.tonauth') || '').split('.');
+    /* a session that has run out proves nothing any more */
+    if (!(Number(exp) * 1000 > Date.now())) return null;
+    return normalise(address);
   } catch {
     return null;
   }
@@ -67,15 +58,12 @@ const CACHE_OWNER = 'ghoster.perps.wallet';
 /**
  * Tell the scope which wallet is connected. Null clears it.
  *
- * Also the one place a wallet CHANGE is noticed, which is what closes the
- * read-only half of the leak. `ghoster.tradeAddr` and `.view` are caches of a
+ * Also the one place a wallet change is noticed. `ghoster.tradeAddr` and `.view` are caches of a
  * public trading address read by the classic scripts in public/ (perps-pro,
  * fund-pro, perps-activity). Those cannot import from src/, so rather than
  * thread a scope through three vanilla files, the cache is made unable to
  * OUTLIVE its wallet: the moment a different wallet is proven, it is dropped
  * and the discovery ladder re-derives for whoever is actually connected.
- * Without this, wallet B would correctly have no signing key and still sit
- * there reading wallet A's positions and balance out of a stale slot.
  */
 export function setPerpsWallet(addr: string | null | undefined): void {
   const next = normalise(addr);
@@ -103,8 +91,7 @@ export function perpsScope(): string | null {
 /**
  * A storage path for this wallet, or null when no wallet is proven.
  *
- * Every perps storage key in the app must come from here. A literal string
- * anywhere else is the bug coming back.
+ * Every perps storage key in the app must come from here.
  */
 export function perpsKey(base: string): string | null {
   const w = perpsScope();
@@ -115,16 +102,15 @@ export function perpsKey(base: string): string | null {
 
 const LEGACY_MASTER = 'ghoster.perps.master';
 const LEGACY_SAVED = 'ghoster.perps.master.saved';
-/** Where an unattributable legacy master waits to be claimed by hand. */
+/** Where an unattributable legacy master waits to be restored by hand. */
 export const ORPHAN_KEY = 'ghoster.perps.orphan';
 
 /**
  * How the current wallet came to hold its key: 'mint' or 'claim'.
  *
- * Scoped like the key itself. This exists because [removeMasterCopiesElsewhere]
- * could not tell the difference between the two cases that look identical in
- * storage: my own copy under an address I used to have, and somebody else's
- * original. Bytes cannot answer that. Provenance can.
+ * Scoped like the key itself. [removeMasterCopiesElsewhere] needs it to tell apart two cases that look identical in
+ * storage: a wallet's own copy under an older address, and another wallet's original. Bytes cannot answer that.
+ * Provenance can.
  */
 const ORIGIN_BASE = 'ghoster.perps.master.origin';
 
@@ -157,7 +143,7 @@ function mintedHere(): boolean {
 const MIGRATED_FLAG = 'ghoster.perps.migrated';
 
 /**
- * Deal with what the old build left behind. Runs once per browser, at boot.
+ * Move what was stored before keys were scoped. Runs once per browser, at boot.
  *
  * Three different values, three different answers, because what it costs to be
  * wrong differs by three orders of magnitude.
@@ -178,15 +164,11 @@ const MIGRATED_FLAG = 'ghoster.perps.migrated';
  * derivable from nothing (a TON wallet cannot produce it: ed25519, and signData
  * mixes in a wallet-chosen timestamp), and this module's own neighbour says it
  * plainly, forgetting the key leaves whatever sits at the venue reachable only
- * by that exact key. Deleting it is fund loss. Adopting it into whichever
- * wallet boots first is the permanent wrong association, and the wrong wallet
- * would be trading on the right one's money, which is the reported bug wearing
- * a different hat.
+ * by that exact key, so it is neither deleted nor adopted into whichever wallet boots first.
  *
- * So it is moved somewhere no wallet reads, and the owner is offered it by
- * name, with the address shown, in the trading-key sheet. Nothing anywhere
- * ever recorded which wallet made this key; a claim is the only honest way to
- * find out, and it is reversible.
+ * So it is moved somewhere no wallet reads, and it stays there until someone
+ * restores that same key by hand: nothing anywhere ever recorded which wallet
+ * made it, so no wallet can be handed it.
  */
 export function migrateLegacyPerps(): void {
   try {
@@ -213,7 +195,7 @@ export function migrateLegacyPerps(): void {
   }
 }
 
-/** The quarantined key, if this browser has one waiting. */
+/** The quarantined key, if this browser has one: for the sweep and a restore by hand, never to offer. */
 export function orphanSecret(): string | null {
   try {
     const v = localStorage.getItem(ORPHAN_KEY);
@@ -224,23 +206,16 @@ export function orphanSecret(): string | null {
 }
 
 /**
- * Master keys stored under some OTHER wallet than the one connected.
+ * Other addresses this browser holds a master key under. Addresses, never keys: another wallet's key stays that wallet's.
  *
- * Scoping introduces a failure mode it must also answer for: the scope is the
- * wallet's raw address, and a raw address is not forever. Upgrading a TON
- * wallet contract (v4R2 to W5 is the common one) gives the same person a
- * different raw address, so `...master@0:old` becomes a key nothing reads,
- * holding a funded Hyperliquid account. Scoping without this would trade a
- * leak for a lockout, which is the worse of the two.
- *
- * These are OFFERED, never read automatically. The signing path stays strictly
- * bound to the connected wallet; this only lets the owner see that a key is
- * here and say it is theirs, with the same warning the legacy orphan carries.
- * On a shared browser the other wallet's key is visible in this list, so the
- * claim is deliberate, named by address, and reversible.
+ * The scope is the wallet's raw address, and a raw address is not forever. Upgrading a TON wallet contract (v4R2 to W5
+ * is the common one) gives the same key a different raw address, so `...master@0:old` becomes a key nothing reads,
+ * holding a funded Hyperliquid account. The trading-key sheet asks GhosterDex whether such an address comes from the
+ * key this wallet proved at login (/api/trade/samekey), and only then moves the key across (masterUnder). The signing
+ * path stays bound to the connected wallet throughout.
  */
-export function foreignMasters(): { scope: string; secret: string }[] {
-  const out: { scope: string; secret: string }[] = [];
+export function foreignScopes(): string[] {
+  const out: string[] = [];
   try {
     const mine = perpsScope();
     for (let i = 0; i < localStorage.length; i++) {
@@ -248,35 +223,51 @@ export function foreignMasters(): { scope: string; secret: string }[] {
       if (!k || !k.startsWith(`${LEGACY_MASTER}@`)) continue;
       const scope = k.slice(LEGACY_MASTER.length + 1);
       if (!scope || scope === mine) continue;
-      const secret = localStorage.getItem(k);
-      if (secret && /^0x[0-9a-f]{64}$/.test(secret)) out.push({ scope, secret });
+      if (/^0x[0-9a-f]{64}$/.test(localStorage.getItem(k) || '')) out.push(scope);
     }
   } catch {
-    /* storage unavailable: nothing to offer */
+    /* storage unavailable: nothing here */
   }
   return out;
 }
 
-/**
- * Stop offering a key to THIS wallet, without destroying it.
- *
- * "Not mine" used to call removeItem on the quarantine, which is a one-tap
- * unconfirmed delete of a key that may hold another person's funds, offered,
- * on a shared browser, to precisely the person who cannot know what it holds
- * and has just been told it is not theirs. Saying "this is not mine" is a
- * statement about the speaker, never a licence to destroy it.
- *
- * So the key stays exactly where it is and this wallet stops being shown it.
- * The rightful owner connects their own wallet and is offered it as before.
- * Hiding is per wallet AND per key, so dismissing one does not bury another.
- */
-export function hideFromThisWallet(secret: string): void {
+/** The copy under an address just proven to be this wallet's, once the key has moved here. */
+export function dropMasterUnder(scope: string): void {
   try {
-    const w = perpsScope() || 'nowallet';
-    const tag = secret.slice(-16); // enough to name it, never the key itself
-    localStorage.setItem(`ghoster.perps.hidden:${w}:${tag}`, '1');
+    localStorage.removeItem(`${LEGACY_MASTER}@${scope}`);
   } catch {
-    /* nowhere to remember it; the offer simply reappears */
+    /* nothing to remove */
+  }
+}
+
+const REMOVED_BASE = 'ghoster.perps.removed';
+
+/** This wallet's owner took the account off this browser: nothing brings it back on its own. */
+export function noteAccountRemoved(): void {
+  try {
+    const k = perpsKey(REMOVED_BASE);
+    if (k) localStorage.setItem(k, '1');
+  } catch {
+    /* nowhere to remember it */
+  }
+}
+
+export function accountRemoved(): boolean {
+  try {
+    const k = perpsKey(REMOVED_BASE);
+    return Boolean(k) && localStorage.getItem(k as string) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/** The key held under another address, for the one caller that has just proved that address is this same wallet's. */
+export function masterUnder(scope: string): string | null {
+  try {
+    const secret = localStorage.getItem(`${LEGACY_MASTER}@${scope}`);
+    return secret && /^0x[0-9a-f]{64}$/.test(secret) ? secret : null;
+  } catch {
+    return null;
   }
 }
 
@@ -284,18 +275,12 @@ export function hideFromThisWallet(secret: string): void {
  * Delete plaintext copies of ONE EXACT key held under other wallet scopes.
  *
  * A key reaches a second scope legitimately. Upgrading a TON wallet contract
- * gives the same owner a new raw address, so the claim flow copies the key to
- * the new scope and deliberately leaves the source alone. A mistaken claim has
- * to be reversible, and `hideFromThisWallet` above exists precisely because
- * deleting a key on someone's say-so is not acceptable.
+ * gives the same owner a new raw address, so the move copies the key to the new
+ * scope and leaves the source alone.
  *
- * Two moments end that. Protecting the key means "no plaintext of this key is
- * on this device", and sealing only rewrites the current scope's slot; without
- * this sweep the same 32 bytes stay readable one storage key along, and
- * isProtected() reports true while the reader it defends against still wins.
- * Forgetting means "this account is off this device", and it was equally
- * partial. Someone wiping a laptop before selling it was told the account was
- * gone while a copy remained.
+ * Two moments end that. Protecting the key means no plaintext of it is on this device, and forgetting means the
+ * account is off this device. Each of those rewrites only the current scope's slot, so this sweep takes the copies
+ * elsewhere.
  *
  * Matched on the SECRET, never on the scope. Another wallet's own unrelated key
  * belongs to whoever put it there; the only thing removed is a duplicate of the
@@ -310,36 +295,17 @@ export function removeMasterCopiesElsewhere(secret: string): number {
     /* The quarantine slot, which belongs to nobody.
      *
      * migrateLegacyPerps parks a pre-scoping key here and nothing else ever
-     * clears it unless the owner claims it explicitly. It sat outside this
-     * sweep, so a key could be sealed or forgotten while a byte-identical
-     * plaintext copy stayed one storage key along, which is exactly the
-     * sold-laptop case above. Safe to take on an exact match for the same
+     * clears it unless the owner restores it by hand. Safe to take on an exact match for the same
      * reason the rest of the sweep is: matching the secret proves the caller
      * already holds those bytes, and the slot has no owner to take it from. */
     if (localStorage.getItem(ORPHAN_KEY) === secret) doomed.push(ORPHAN_KEY);
 
-    /* Another wallet's slot is only ever swept by the wallet that MINTED the
-     * key, and this is the line that stops a theft.
-     *
-     * "The caller demonstrably already holds those bytes" is true and does not
-     * establish whose copy is the original. A second wallet in the same browser
-     * is offered this key by foreignMasters(), can claim it, and could then
-     * seal it, at which point this sweep deleted the FIRST wallet's slot. The
-     * victim reconnected to "No trading account on this device yet" while the
-     * same 32 bytes sat under the claimer's passphrase. No code execution, no
-     * devtools, just the Settings screen, and a shared browser profile is
-     * ordinary: a family laptop, or a Telegram Mini App, where TON Connect
-     * sessions are shared across accounts on one origin.
-     *
-     * A claimer keeps their own copy and takes nobody else's. The cost is that
-     * an owner whose wallet address changed leaves plaintext behind under the
-     * old address, which is recoverable and not fund loss; the alternative cost
-     * was somebody else's account. */
+    /* Another wallet's slot is only ever swept by the wallet that MINTED the key. Holding the bytes does not establish
+     * whose copy is the original, so a claimer keeps their own copy and takes nobody else's. The cost is that an owner
+     * whose wallet address changed leaves plaintext behind under the old address, which is recoverable. */
     const sweepOtherScopes = mintedHere();
-    /* length/key(i), the same walk foreignMasters() uses above. Object.keys on
-       localStorage happens to work in a browser and returns the method names on
-       anything standing in for it, which is how the first version of this
-       silently swept nothing at all. */
+    /* length/key(i), the same walk foreignScopes() uses above: Object.keys returns the method names on anything
+       standing in for localStorage. */
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (!k || !k.startsWith(`${LEGACY_MASTER}@`)) continue;
@@ -356,24 +322,4 @@ export function removeMasterCopiesElsewhere(secret: string): number {
     /* storage unavailable: nothing to sweep, and nothing was promised */
   }
   return doomed.length;
-}
-
-/** Whether this wallet has already said a given key is not theirs. */
-export function hiddenFromThisWallet(secret: string): boolean {
-  try {
-    const w = perpsScope() || 'nowallet';
-    return localStorage.getItem(`ghoster.perps.hidden:${w}:${secret.slice(-16)}`) === '1';
-  } catch {
-    return false;
-  }
-}
-
-/** Retire the quarantine slot after its key has been CLAIMED into a wallet.
- *  Only ever called once the same secret is safely stored under a scope. */
-export function orphanClaimed(): void {
-  try {
-    localStorage.removeItem(ORPHAN_KEY);
-  } catch {
-    /* nothing to remove */
-  }
 }

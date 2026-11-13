@@ -20,6 +20,7 @@
  * paused or not.
  */
 import nacl from 'tweetnacl';
+import { spendRefusal } from './intent';
 
 export type SealBlob = { v: 1; to: string; epk: string; n: string; c: string };
 
@@ -366,6 +367,8 @@ export async function returnWithSealed(o: {
           dry: false,
         });
         if (!q?.depositAddress || !q.signPayload) throw new Error('GhosterDex did not prepare this move. Try again.');
+        const no = spendRefusal(q.signPayload, { account: pk, receiver: q.depositAddress, assetId: row.assetId, maxRaw: raw });
+        if (no) throw new Error(`What came back to sign is not this move: ${no}. Nothing was signed.`);
         o.onStep?.({ coin, step: 'signing' });
         const walletSig = await signText(keys.secretKey, opened.address, q.signPayload);
         await api.call('/api/execute', {

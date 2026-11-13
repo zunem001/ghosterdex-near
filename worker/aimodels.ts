@@ -137,6 +137,16 @@ export async function noteUpstreamCredit(env: Pick<AiModelsEnv, 'STATE'>, m: Pic
   ).catch(() => {});
 }
 
+/** Cost the house carried past a balance (worker/ailedger.ts `shortfall`): the owner hears once a day that it happened. */
+export async function noteShortfall(env: Pick<AiModelsEnv, 'STATE'>, alert?: (text: string) => Promise<unknown>): Promise<void> {
+  console.log('[ailedger] shortfall');
+  if (!alert) return;
+  const key = `aishort:told:${new Date().toISOString().slice(0, 10)}`;
+  if (await env.STATE.get(key).catch(() => null)) return;
+  await env.STATE.put(key, '1', { expirationTtl: 2 * 86400 }).catch(() => {});
+  await alert('ℹ️ <b>Private AI: an answer cost more than its balance covered</b>\nThe difference fell to the house. worker/ailedger.ts keeps it per account as shortfall.').catch(() => {});
+}
+
 /** What a person sees of a model: never its sampling settings. */
 export function publicModel(m: AiModel) {
   return {
