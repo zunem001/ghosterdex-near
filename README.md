@@ -74,6 +74,7 @@ The hackathon counts code written since its announcement on 2026-10-19. **[The d
 | Nov 3 | AI scan: a private NEAR AI model checks a site or transaction in the Android browser, paid from credit | Closed source. [See the map](docs/near-map.md#the-browsers-ai-scan) |
 | Nov 4 | An attestation check for anyone to run, with these tests and demos | `demo/`, `test/` |
 | Nov 5 | Kit 1.9.1, and how Private AI counts usage | `agent/kit/`, `worker/ailedger.ts`, `worker/privateai.ts` |
+| Nov 11 | The AI scan is free: GhosterDex pays NEAR AI for each scan, and what the model is told was measured on the real model, against real thefts and real pages, before it changed | Closed source. [See the map](docs/near-map.md#the-browsers-ai-scan) |
 
 ## What it is built on
 

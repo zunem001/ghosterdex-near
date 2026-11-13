@@ -152,11 +152,13 @@ An agent gets a wallet of its own, the same shape as a person's, so its money fe
 
 ## The browser's AI scan
 
-**New, closed source, Android only.** The wallet's browser for third-party apps can ask a private NEAR AI model about a site or a transaction before you connect or sign. It is off by default, because it spends money, and is paid from Private AI credit at cost.
+**New, closed source, Android only.** The wallet's browser for third-party apps asks a private NEAR AI model about a site before you connect and about a transaction before you sign. Since Nov 11 it is free: GhosterDex pays NEAR AI for each scan at cost, and a person's Private AI credit is not touched. Their usage history shows each scan as free.
 
 - **The model** is `z-ai/glm-5.3-flash`, or another ready model on secure hardware. It is never a model outside secure hardware, and with none ready the scan reports that it failed.
+- **What it is shown:** the site's name and a page's own words and counts, or what a transaction would move and to what kind of account. Never who is asking, and never a wallet address.
+- **Measured first.** What the model is told was tried on the real model before it replaced the old wording: 150 real thefts and 143 honest transactions from the public chain, 60 ordinary payments, and 890 real pages, some from public scam lists and some honest. A wording that did worse on the real pages was dropped.
 - **The stop** that catches a page asking for a recovery phrase or key is local and free. The AI can only raise a warning, and the words on screen come from the app, not from the model.
-- **What is kept:** the server logs and stores no URL, page or answer. It keeps the usage row every request leaves, and a domain's age for a week under a hash. rdap.org is asked a domain's age, and TonAPI runs the transaction preview.
+- **What is kept:** the server logs and stores no URL, page or answer. It keeps the usage row every request leaves, and a domain's age for a week under a hash. rdap.org is asked a domain's age, TonAPI runs the transaction preview and gives prices, and the list of most visited sites comes from tranco-list.eu in a request that carries nothing about anyone.
 
 ## Other doors
 
